@@ -853,6 +853,15 @@ plotchar(adx >= adx_trend_min, title = "DEBUG: ADX OK (bear setup)", char = "4",
 plotchar(bear_trend_extension_atr >= ext_min, title = "DEBUG: Extension OK (bear setup)", char = "5", location = location.top, size = size.tiny, color = color.fuchsia)
 plotchar(bull_break_trigger, title = "DEBUG: Bull Break Trigger", char = "B", location = location.top, size = size.tiny, color = color.aqua)
 
+// TEMP DEBUG: session-anchor sanity check. Anchored VWAP has been reading
+// ~151 while the day's actual range is ~135-144 (above the session high),
+// which only happens if is_new_range isn't re-firing every session — check
+// rth_active/is_new_range/session_open_price directly via the Data Window.
+plot(rth_active ? 1 : 0, title = "DEBUG: rth_active")
+plot(is_new_range ? 1 : 0, title = "DEBUG: is_new_range")
+plot(session_open_price, title = "DEBUG: session_open_price")
+plot(cum_vol, title = "DEBUG: cum_vol")
+
 // Break-armed markers — deliberately a small plotshape, distinct from the
 // SELL/SNAPBACK label.new signal markers below.
 plotshape(showState and bear_break_armed_now, title = "Bear Break Armed",
