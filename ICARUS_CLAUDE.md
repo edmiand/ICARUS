@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Status: Phase 1 of an 8-phase build. This document will be filled out fully at Phase 8 — it currently
+**Status: Phase 2 of an 8-phase build. This document will be filled out fully at Phase 8 — it currently
 covers only what exists in the code today.**
 
 ## Project Overview
@@ -72,9 +72,14 @@ here it is a prerequisite.
     [Swing Confirmation Delay](#swing-confirmation-delay) below. Deliberately does **not** use
     `ta.pivothigh`/`ta.pivotlow` (banned for signal logic per the phase spec — see
     [Pine v6 Gotchas](#pine-script-v6-gotchas-encountered-so-far)).
+11. **State 1: Trend Qualification** — `trend_qualified_bear`/`trend_qualified_bull` (`var bool` latches),
+    each requiring: structure held `trendMinBars` bars (via a self-referencing streak counter), EMA
+    cascade agreement, price on the correct side of `anchored_vwap`, `adx >= adx_trend_min`, and session
+    extension `>= ext_min`. Persists through up to 10 consecutive failing bars, then resets; also resets
+    on session rollover. See [Trend Qualification Latch](#trend-qualification-latch) below.
 
-Not yet implemented (later phases): trend qualification, break detection, confirmation/signal firing,
-vetoes, ATR bracket exits, R-multiple tracking, full state-machine dashboard, alerts.
+Not yet implemented (later phases): break detection, confirmation/signal firing, vetoes, ATR bracket
+exits, R-multiple tracking, full state-machine dashboard, alerts.
 
 ---
 
@@ -136,6 +141,18 @@ sequence). No signal path in this system can read a swing before that delay elap
 anywhere in the script — there is no separate, faster-updating pivot value anything could accidentally
 read instead. `structure_bullish`/`structure_bearish` are pure reads of that already-confirmed state, so
 they add no repaint risk of their own.
+
+**Trend Qualification Latch:** `trend_qualified_bear` (a qualifying UPTREND, `structure_bullish`, that may
+break down) and `trend_qualified_bull` (the mirror, off `structure_bearish`) are independent `var bool`
+latches, not forced mutually exclusive at this stage. In practice they rarely coexist, because
+`structure_bullish`/`structure_bearish` already can't both be true on the same bar and the streak counters
+(`bull_structure_streak`/`bear_structure_streak`) that gate qualification reset to 0 the instant structure
+flips. But because a latch persists through up to 10 consecutive bars of failing conditions before
+resetting, it is theoretically possible for both to be true briefly if structure whipsaws while one latch
+is still inside its failure window — the dashboard's "State" row breaks that tie by displaying bear first,
+deterministically. Rule 8 ("one direction at a time") is not enforced here because it applies to Phase 3's
+"armed" break state, not to State 1 eligibility — Phase 3 will need to explicitly cancel the opposite
+side's armed state when one arms.
 
 **Extension is a prerequisite, not a penalty:** the inverse of SuperLazyTrade's Gate 2 (Stretch). Do not
 port stretch-penalty logic across — a large `ext_min` reading here *qualifies* a setup rather than

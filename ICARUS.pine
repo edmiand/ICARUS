@@ -338,6 +338,91 @@ bool structure_bearish = not na(prev_swing_high) and not na(prev_swing_low) and
 bool structure_neutral = not structure_bullish and not structure_bearish
 
 //======================================================================
+// STATE 1: TREND QUALIFICATION
+//======================================================================
+// A trend qualifies as "worth unwinding" only once ALL of: structure has
+// held for trendMinBars bars, the EMA cascade agrees, price is on the
+// correct side of the RTH-anchored VWAP, ADX confirms trend strength, and
+// the session has extended far enough (daily-ATR units) to give the
+// eventual break something to retrace into. Bearish setup = a qualifying
+// UPTREND (structure_bullish) that may break down; bullish setup mirrors
+// it off structure_bearish. trend_qualified_bear/bull are independent
+// latches, not forced mutually exclusive here — structure_bullish and
+// structure_bearish already can't both be true on the same bar, which
+// makes simultaneous qualification rare, but the two latches CAN persist
+// through each other's failure window (10 bars) in principle. Rule 8
+// ("one direction at a time") is enforced where it actually applies —
+// Phase 3's break-arming — not at this eligibility stage.
+
+// Consecutive-bar streak of the underlying structure classification,
+// used to test the trendMinBars requirement. Self-referencing series
+// (reads its own previous-bar value via [1]); resets to 0 the instant
+// structure_bullish/bearish goes false, so no stale streak lingers once
+// structure flips.
+int bull_structure_streak = structure_bullish ? nz(bull_structure_streak[1]) + 1 : 0
+int bear_structure_streak = structure_bearish ? nz(bear_structure_streak[1]) + 1 : 0
+
+// Session extension, in daily-ATR units, for each candidate direction.
+float bear_trend_extension_atr = (not na(atr_daily) and atr_daily > 0 and not na(session_open_price) and not na(session_high)) ?
+     (session_high - session_open_price) / atr_daily : 0.0
+float bull_trend_extension_atr = (not na(atr_daily) and atr_daily > 0 and not na(session_open_price) and not na(session_low)) ?
+     (session_open_price - session_low) / atr_daily : 0.0
+
+bool bear_setup_conditions = bull_structure_streak >= trendMinBars and ema9 > ema20 and ema20 > ema50 and
+     close > anchored_vwap and adx >= adx_trend_min and bear_trend_extension_atr >= ext_min
+
+bool bull_setup_conditions = bear_structure_streak >= trendMinBars and ema9 < ema20 and ema20 < ema50 and
+     close < anchored_vwap and adx >= adx_trend_min and bull_trend_extension_atr >= ext_min
+
+var bool trend_qualified_bear = false
+var bool trend_qualified_bull = false
+var int  bear_qualified_since_bar = na
+var int  bull_qualified_since_bar = na
+var int  bear_qualify_fail_streak = 0
+var int  bull_qualify_fail_streak = 0
+
+// (c) Session rollover — qualification does not carry across sessions;
+// the extension and VWAP anchors it depends on just reset to zero.
+if is_new_range
+    trend_qualified_bear := false
+    trend_qualified_bull := false
+    bear_qualified_since_bar := na
+    bull_qualified_since_bar := na
+    bear_qualify_fail_streak := 0
+    bull_qualify_fail_streak := 0
+
+// Bear-setup (uptrend) qualification latch
+if not trend_qualified_bear and bear_setup_conditions
+    trend_qualified_bear := true
+    bear_qualified_since_bar := bar_index
+    bear_qualify_fail_streak := 0
+else if trend_qualified_bear
+    if bear_setup_conditions
+        bear_qualify_fail_streak := 0
+    else
+        bear_qualify_fail_streak += 1
+        // (b) 10 consecutive bars failing the qualifying conditions -> reset
+        if bear_qualify_fail_streak >= 10
+            trend_qualified_bear := false
+            bear_qualified_since_bar := na
+            bear_qualify_fail_streak := 0
+
+// Bull-setup (downtrend) qualification latch — mirror of the above
+if not trend_qualified_bull and bull_setup_conditions
+    trend_qualified_bull := true
+    bull_qualified_since_bar := bar_index
+    bull_qualify_fail_streak := 0
+else if trend_qualified_bull
+    if bull_setup_conditions
+        bull_qualify_fail_streak := 0
+    else
+        bull_qualify_fail_streak += 1
+        if bull_qualify_fail_streak >= 10
+            trend_qualified_bull := false
+            bull_qualified_since_bar := na
+            bull_qualify_fail_streak := 0
+
+//======================================================================
 // VISUALS (SCAFFOLD)
 //======================================================================
 plot(anchored_vwap, "Anchored VWAP", color = color.new(color.blue, 40), linewidth = 1)
@@ -345,12 +430,12 @@ plot(showLevels ? last_swing_high : na, "Last Swing High", color = color.new(col
 plot(showLevels ? last_swing_low : na, "Last Swing Low", color = color.new(color.aqua, 0), style = plot.style_stepline, linewidth = 1)
 
 //======================================================================
-// DASHBOARD (SCAFFOLD — Phase 0 only)
+// DASHBOARD (SCAFFOLD)
 //======================================================================
-// This is a minimal placeholder so Phase 0's session-anchoring work is
-// visible on a chart for manual verification. The full state-machine
-// dashboard (State, Structure, Retracement, Vetoes, Position, R stats)
-// is built in Phase 7 and will replace this block.
+// This is a minimal placeholder so each phase's work is visible on a
+// chart for manual verification. The full state-machine dashboard
+// (State, Structure, Retracement, Vetoes, Position, R stats) is built
+// in Phase 7 and will replace this block.
 if showDash and barstate.islast
     var table d = table.new(position.bottom_right, 2, DASHBOARD_MAX_ROWS,
          bgcolor = color.new(color.black, 0), border_width = 1)
@@ -370,6 +455,21 @@ if showDash and barstate.islast
     table.cell(d, 1, row, profile_name, text_color = color.white, text_size = size.small)
     row += 1
 
+    // State 1 qualification — arrow shows the underlying trend direction
+    // being watched for reversal (↑ = uptrend, watching for a bearish
+    // unwind; ↓ = downtrend, watching for a bullish snapback), with the
+    // qualifying direction's extension in daily-ATR units alongside it.
+    // If both latches were somehow true at once (see comment above the
+    // qualification block), bear takes display priority — a deterministic
+    // tie-break, not expected in normal operation.
+    string icarus_state = trend_qualified_bear ? "TRENDING ↑ (" + str.tostring(bear_trend_extension_atr, "#.#") + " ATR)" :
+         trend_qualified_bull ? "TRENDING ↓ (" + str.tostring(bull_trend_extension_atr, "#.#") + " ATR)" :
+         "UNQUALIFIED"
+    color state_color = trend_qualified_bear ? color.red : trend_qualified_bull ? color.lime : color.gray
+    table.cell(d, 0, row, "State", text_color = color.white, text_halign = text.align_left, text_size = size.small)
+    table.cell(d, 1, row, icarus_state, text_color = state_color, text_size = size.small)
+    row += 1
+
     table.cell(d, 0, row, "RVOL", text_color = color.white, text_halign = text.align_left, text_size = size.small)
     table.cell(d, 1, row, str.tostring(rel_vol, "#.##") + "x " + rvol_mode_label, text_color = color.white, text_size = size.small)
     row += 1
@@ -382,9 +482,10 @@ if showDash and barstate.islast
         table.cell(d, 1, row, rangeAnchor + " @ " + anchor_ts, text_color = color.white, text_size = size.small)
         row += 1
 
-        // Raw extension figure (session_high side only, no qualification
-        // logic yet — that arrives in Phase 2). Verify this reads near
-        // zero at 09:35 on ES/SI before trusting anything built on top of it.
+        // Raw extension figure (session_high side only, direction-agnostic
+        // — kept from Phase 0 for anchor verification independent of
+        // qualification state). Verify this reads near zero at 09:35 on
+        // ES/SI before trusting anything built on top of it.
         string ext_display = (not na(atr_daily) and atr_daily > 0 and not na(session_open_price)) ?
              str.tostring((session_high - session_open_price) / atr_daily, "#.##") + " ATR (open " +
              str.tostring(session_open_price, format.mintick) + ")" : "—"
