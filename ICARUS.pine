@@ -360,8 +360,10 @@ bool structure_neutral = not structure_bullish and not structure_bearish
 // (reads its own previous-bar value via [1]); resets to 0 the instant
 // structure_bullish/bearish goes false, so no stale streak lingers once
 // structure flips.
-int bull_structure_streak = structure_bullish ? nz(bull_structure_streak[1]) + 1 : 0
-int bear_structure_streak = structure_bearish ? nz(bear_structure_streak[1]) + 1 : 0
+var int bull_structure_streak = 0
+var int bear_structure_streak = 0
+bull_structure_streak := structure_bullish ? bull_structure_streak + 1 : 0
+bear_structure_streak := structure_bearish ? bear_structure_streak + 1 : 0
 
 // Session extension, in daily-ATR units, for each candidate direction.
 float bear_trend_extension_atr = (not na(atr_daily) and atr_daily > 0 and not na(session_open_price) and not na(session_high)) ?
