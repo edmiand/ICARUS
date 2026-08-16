@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Status: Phase 5 of an 8-phase build. This document will be filled out fully at Phase 8 — it currently
+**Status: Phase 6 of an 8-phase build. This document will be filled out fully at Phase 8 — it currently
 covers only what exists in the code today.**
 
 ## Project Overview
@@ -105,9 +105,17 @@ here it is a prerequisite.
     - *Consolidation Cancel* (Veto 4) needed no new code — already enforced by Phase 3's `confirmMaxBars`
       cancellation.
     Dashboard "Vetoes" row lists any active veto by name, direction-tagged where relevant.
+15. **ATR Bracket Exits and R-Multiple Tracking** — on entry, computes and freezes `stop_*`/`target1_*`/
+    `target2_*`/`risk_*` once (a bracket, not a trailing stop): stop beyond the invalidation reference
+    (floored at `minTickStop` ticks, flagged on the dashboard when floored), Target 1 = VWAP at entry,
+    Target 2 per `target2Mode`. Exit fires on whichever of STOP/T1/T2/TIME touches first (STOP checked
+    first, conservatively). Closing a position clears the corresponding alternation guard
+    (`b_fired`/`s_fired`) — this is what Phase 4 deferred. Realized R multiples push into
+    `trade_r_results_long`/`_short` (FIFO-capped at 50); Avg R is the headline dashboard metric, win rate
+    secondary. See [ATR Bracket Design Notes](#atr-bracket-design-notes) below.
 
-Not yet implemented (later phases): ATR bracket exits, R-multiple tracking, full state-machine dashboard,
-alerts.
+Not yet implemented (later phases): full state-machine dashboard (this document's scaffold dashboard
+stays in place until Phase 7 replaces it), alerts.
 
 ---
 
@@ -230,6 +238,31 @@ America/New_York and inappropriate for crypto / 24h futures without disabling `u
 not making `request.security` calls conditional. `useHtfVeto` only gates whether `htf_bullish`/
 `htf_bearish` are allowed to contribute to `bear_vetoed`/`bull_vetoed` — this avoids the recalculation
 churn/edge cases that conditional `request.security` calls can trigger.
+
+**ATR Bracket Design Notes:**
+
+- *Everything is frozen at entry, including "EMA50."* Session Open and the Fixed-R formula are inherently
+  static once entry price and risk are known, but `target2Mode = "EMA50"` could plausibly mean either "the
+  EMA50 value at entry" (frozen) or "exit when price touches the live, moving EMA50" (a trailing target).
+  This implementation freezes it at entry, for consistency with the other two modes and with the phase's
+  own framing — "ATR **Bracket** Exits" — a bracket order has fixed legs set once, not a target that
+  chases price. If a moving EMA50 target was intended, that's a different (and larger) change: it would
+  mean Target 2 is no longer a fixed level at all, which has knock-on effects for how "current R" and the
+  eventual realized R at exit are computed.
+- *Exit priority order (STOP > T1 > T2 > TIME) is a judgment call, not specified in the phase text.* A
+  single OHLC bar can't tell an indicator whether price touched the stop or a target first intrabar,
+  so STOP is checked first as the conservative assumption. T1 is checked before T2 because Target 1 (VWAP)
+  is normally closer to entry than Target 2, so it would be touched first in the typical case anyway.
+- *`timeStopBars = 0` is not documented as "disabled."* Unlike `minTickStop`, whose input label explicitly
+  says "0 = off," `timeStopBars`'s label does not. This implementation takes that at face value: `0` means
+  the time stop fires on the very next bar after entry (`bar_index - entry_bar >= 0` is immediately true),
+  not "disabled." If a disable convention was intended for `0`, flag it — as implemented, setting
+  `timeStopBars = 0` will force nearly every trade to exit after one bar via the TIME branch.
+- *Position-close clears only the alternation guard, not sizing.* ICARUS is an `indicator()`, not a
+  `strategy()` — there is no real position size or P&L account. "Closing the position" here means: record
+  one realized R multiple, flip `in_position_*` false, and clear `b_fired`/`s_fired` so the next
+  qualifying signal can fire. There is no partial-exit/scaling model — whichever of T1/T2/STOP/TIME
+  touches first closes the entire (notional) trade for R-tracking purposes.
 
 **Extension is a prerequisite, not a penalty:** the inverse of SuperLazyTrade's Gate 2 (Stretch). Do not
 port stretch-penalty logic across — a large `ext_min` reading here *qualifies* a setup rather than

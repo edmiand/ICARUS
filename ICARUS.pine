@@ -686,6 +686,143 @@ if barstate.isconfirmed
                 bounce_occurred_bull := false
 
 //======================================================================
+// ATR BRACKET EXITS AND R-MULTIPLE TRACKING
+//======================================================================
+// Structural exits, not fixed-percentage: the stop sits beyond the
+// failed bounce (Phase 4's invalidation reference), Target 1 is VWAP at
+// entry (the reversion magnet), Target 2 is per target2Mode. All bracket
+// levels are computed once, at entry, and held fixed thereafter — a
+// bracket, not a trailing stop; "EMA50" mode is read at entry like the
+// other two modes, for the same reason (see ICARUS_CLAUDE.md). Exit type
+// is whichever of STOP/T1/T2/TIME touches first, checked in that
+// priority order — STOP first because an indicator can't know intrabar
+// sequencing, so a bar that could have hit both stop and a target is
+// conservatively assumed to have hit the stop.
+var bool  in_position_bear = false
+var float stop_bear = na
+var float target1_bear = na
+var float target2_bear = na
+var float risk_bear = na
+var bool  stop_floored_bear = false
+var int   entry_bar_bear = na
+
+var bool  in_position_bull = false
+var float stop_bull = na
+var float target1_bull = na
+var float target2_bull = na
+var float risk_bull = na
+var bool  stop_floored_bull = false
+var int   entry_bar_bull = na
+
+var array<float> trade_r_results_long = array.new<float>()
+var array<float> trade_r_results_short = array.new<float>()
+
+add_r_result(array<float> arr, float r, int max_size) =>
+    array.push(arr, r)
+    if array.size(arr) > max_size
+        array.shift(arr)
+    arr
+
+bool exit_stop_bear = false
+bool exit_t1_bear = false
+bool exit_t2_bear = false
+bool exit_time_bear = false
+
+bool exit_stop_bull = false
+bool exit_t1_bull = false
+bool exit_t2_bull = false
+bool exit_time_bull = false
+
+if barstate.isconfirmed
+    // --- Entry: set the bracket once, at the confirmation bar ---
+    if signal_sell
+        float raw_stop_bear = invalidation_bear + atr * stopAtrMult
+        float raw_distance_bear = raw_stop_bear - entry_price_bear
+        float floor_distance_bear = minTickStop > 0 ? minTickStop * syminfo.mintick : na
+        bool floor_needed_bear = minTickStop > 0 and raw_distance_bear < floor_distance_bear
+        stop_bear := floor_needed_bear ? entry_price_bear + floor_distance_bear : raw_stop_bear
+        stop_floored_bear := floor_needed_bear
+        risk_bear := stop_bear - entry_price_bear
+        target1_bear := anchored_vwap
+        target2_bear := target2Mode == "Session Open" ? session_open_price :
+             target2Mode == "EMA50" ? ema50 :
+             entry_price_bear - (target2R * risk_bear)
+        entry_bar_bear := bar_index
+        in_position_bear := true
+
+    if signal_buy
+        float raw_stop_bull = invalidation_bull - atr * stopAtrMult
+        float raw_distance_bull = entry_price_bull - raw_stop_bull
+        float floor_distance_bull = minTickStop > 0 ? minTickStop * syminfo.mintick : na
+        bool floor_needed_bull = minTickStop > 0 and raw_distance_bull < floor_distance_bull
+        stop_bull := floor_needed_bull ? entry_price_bull - floor_distance_bull : raw_stop_bull
+        stop_floored_bull := floor_needed_bull
+        risk_bull := entry_price_bull - stop_bull
+        target1_bull := anchored_vwap
+        target2_bull := target2Mode == "Session Open" ? session_open_price :
+             target2Mode == "EMA50" ? ema50 :
+             entry_price_bull + (target2R * risk_bull)
+        entry_bar_bull := bar_index
+        in_position_bull := true
+
+    // --- Exit: SHORT position ---
+    if in_position_bear and not signal_sell
+        if high >= stop_bear
+            exit_stop_bear := true
+        else if low <= target1_bear
+            exit_t1_bear := true
+        else if not na(target2_bear) and low <= target2_bear
+            exit_t2_bear := true
+        else if (bar_index - entry_bar_bear) >= timeStopBars
+            exit_time_bear := true
+
+        if exit_stop_bear or exit_t1_bear or exit_t2_bear or exit_time_bear
+            float exit_price_bear = exit_stop_bear ? stop_bear : exit_t1_bear ? target1_bear : exit_t2_bear ? target2_bear : close
+            float realized_r_bear = risk_bear > 0 ? (entry_price_bear - exit_price_bear) / risk_bear : na
+            trade_r_results_short := add_r_result(trade_r_results_short, realized_r_bear, 50)
+            in_position_bear := false
+            // Position closed — reopen the alternation guard for a fresh SELL.
+            s_fired := false
+
+    // --- Exit: LONG position (mirror) ---
+    if in_position_bull and not signal_buy
+        if low <= stop_bull
+            exit_stop_bull := true
+        else if high >= target1_bull
+            exit_t1_bull := true
+        else if not na(target2_bull) and high >= target2_bull
+            exit_t2_bull := true
+        else if (bar_index - entry_bar_bull) >= timeStopBars
+            exit_time_bull := true
+
+        if exit_stop_bull or exit_t1_bull or exit_t2_bull or exit_time_bull
+            float exit_price_bull = exit_stop_bull ? stop_bull : exit_t1_bull ? target1_bull : exit_t2_bull ? target2_bull : close
+            float realized_r_bull = risk_bull > 0 ? (exit_price_bull - entry_price_bull) / risk_bull : na
+            trade_r_results_long := add_r_result(trade_r_results_long, realized_r_bull, 50)
+            in_position_bull := false
+            b_fired := false
+
+// R-multiple stats — Avg R is the headline metric (== expectancy); win
+// rate is tracked but deliberately secondary (a 42% system at 3:1 beats
+// a 60% system at 1:1, and a win-rate number alone can't tell them apart).
+calc_r_stats(array<float> arr) =>
+    int total = array.size(arr)
+    float sum_r = 0.0
+    int wins = 0
+    if total > 0
+        for i = 0 to total - 1
+            float r = array.get(arr, i)
+            sum_r += r
+            if r > 0
+                wins += 1
+    float avg_r = total > 0 ? sum_r / total : na
+    float win_rate = total > 0 ? (wins / total) * 100 : na
+    [avg_r, total, win_rate]
+
+[avg_r_long, total_long, win_rate_long] = calc_r_stats(trade_r_results_long)
+[avg_r_short, total_short, win_rate_short] = calc_r_stats(trade_r_results_short)
+
+//======================================================================
 // VISUALS (SCAFFOLD)
 //======================================================================
 plot(anchored_vwap, "Anchored VWAP", color = color.new(color.blue, 40), linewidth = 1)
@@ -709,6 +846,25 @@ if signal_sell
 if signal_buy
     label.new(bar_index, na, "BUY ⚡ SNAPBACK", yloc = yloc.abovebar,
          style = label.style_label_down, color = color.green, textcolor = color.white, size = size.normal)
+
+// Exit event labels — one per exit type, at the level that triggered it.
+if exit_stop_bear
+    label.new(bar_index, stop_bear, "STOP", yloc = yloc.price, style = label.style_label_down, color = color.new(color.maroon, 0), textcolor = color.white, size = size.small)
+if exit_t1_bear
+    label.new(bar_index, target1_bear, "T1", yloc = yloc.price, style = label.style_label_down, color = color.new(color.teal, 0), textcolor = color.white, size = size.small)
+if exit_t2_bear
+    label.new(bar_index, target2_bear, "T2", yloc = yloc.price, style = label.style_label_down, color = color.new(color.teal, 0), textcolor = color.white, size = size.small)
+if exit_time_bear
+    label.new(bar_index, close, "TIME", yloc = yloc.price, style = label.style_label_down, color = color.new(color.gray, 0), textcolor = color.white, size = size.small)
+
+if exit_stop_bull
+    label.new(bar_index, stop_bull, "STOP", yloc = yloc.price, style = label.style_label_up, color = color.new(color.maroon, 0), textcolor = color.white, size = size.small)
+if exit_t1_bull
+    label.new(bar_index, target1_bull, "T1", yloc = yloc.price, style = label.style_label_up, color = color.new(color.teal, 0), textcolor = color.white, size = size.small)
+if exit_t2_bull
+    label.new(bar_index, target2_bull, "T2", yloc = yloc.price, style = label.style_label_up, color = color.new(color.teal, 0), textcolor = color.white, size = size.small)
+if exit_time_bull
+    label.new(bar_index, close, "TIME", yloc = yloc.price, style = label.style_label_up, color = color.new(color.gray, 0), textcolor = color.white, size = size.small)
 
 //======================================================================
 // DASHBOARD (SCAFFOLD)
@@ -778,6 +934,29 @@ if showDash and barstate.islast
     table.cell(d, 1, row, veto_display, text_color = veto_color, text_size = size.small)
     row += 1
 
+    // Position — entry/stop/T1/T2/current R for the open trade, or FLAT.
+    // ⚠FLOOR flags a stop widened by the minTickStop tick floor, per
+    // Phase 6's explicit "flag it on the dashboard" requirement.
+    float current_r_bear = in_position_bear and risk_bear > 0 ? (entry_price_bear - close) / risk_bear : na
+    float current_r_bull = in_position_bull and risk_bull > 0 ? (close - entry_price_bull) / risk_bull : na
+    string position_display = in_position_bear ?
+         "SELL @ " + str.tostring(entry_price_bear, format.mintick) +
+         " | SL " + str.tostring(stop_bear, format.mintick) + (stop_floored_bear ? " ⚠FLOOR" : "") +
+         " | T1 " + str.tostring(target1_bear, format.mintick) +
+         " | T2 " + str.tostring(target2_bear, format.mintick) +
+         " | R " + str.tostring(current_r_bear, "+#.##;-#.##") :
+         in_position_bull ?
+         "BUY @ " + str.tostring(entry_price_bull, format.mintick) +
+         " | SL " + str.tostring(stop_bull, format.mintick) + (stop_floored_bull ? " ⚠FLOOR" : "") +
+         " | T1 " + str.tostring(target1_bull, format.mintick) +
+         " | T2 " + str.tostring(target2_bull, format.mintick) +
+         " | R " + str.tostring(current_r_bull, "+#.##;-#.##") :
+         "FLAT"
+    color position_color = in_position_bear ? color.red : in_position_bull ? color.lime : color.new(color.gray, 40)
+    table.cell(d, 0, row, "Position", text_color = color.white, text_halign = text.align_left, text_size = size.small)
+    table.cell(d, 1, row, position_display, text_color = position_color, text_size = size.small)
+    row += 1
+
     table.cell(d, 0, row, "RVOL", text_color = color.white, text_halign = text.align_left, text_size = size.small)
     table.cell(d, 1, row, str.tostring(rel_vol, "#.##") + "x " + rvol_mode_label, text_color = color.white, text_size = size.small)
     row += 1
@@ -799,4 +978,23 @@ if showDash and barstate.islast
              str.tostring(session_open_price, format.mintick) + ")" : "—"
         table.cell(d, 0, row, "Extension (raw)", text_color = color.gray, text_halign = text.align_left, text_size = size.small)
         table.cell(d, 1, row, ext_display, text_color = color.white, text_size = size.small)
+        row += 1
+
+        // R-multiple stats, tracked long/short separately — Avg R is the
+        // headline (== expectancy); win rate rides along as a secondary
+        // figure in the same cell rather than its own prominent row.
+        string avg_r_long_display = total_long > 0 ?
+             str.tostring(avg_r_long, "+#.##;-#.##") + "R (" + str.tostring(total_long) + " trades, " +
+             str.tostring(win_rate_long, "#.#") + "% win)" : "— (0 trades)"
+        color avg_r_long_color = na(avg_r_long) ? color.new(color.gray, 40) : avg_r_long >= 0 ? color.lime : color.red
+        table.cell(d, 0, row, "Avg R — LONG", text_color = color.gray, text_halign = text.align_left, text_size = size.small)
+        table.cell(d, 1, row, avg_r_long_display, text_color = avg_r_long_color, text_size = size.small)
+        row += 1
+
+        string avg_r_short_display = total_short > 0 ?
+             str.tostring(avg_r_short, "+#.##;-#.##") + "R (" + str.tostring(total_short) + " trades, " +
+             str.tostring(win_rate_short, "#.#") + "% win)" : "— (0 trades)"
+        color avg_r_short_color = na(avg_r_short) ? color.new(color.gray, 40) : avg_r_short >= 0 ? color.lime : color.red
+        table.cell(d, 0, row, "Avg R — SHORT", text_color = color.gray, text_halign = text.align_left, text_size = size.small)
+        table.cell(d, 1, row, avg_r_short_display, text_color = avg_r_short_color, text_size = size.small)
         row += 1
