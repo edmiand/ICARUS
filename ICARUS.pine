@@ -1077,3 +1077,27 @@ if showDash and barstate.islast
         table.cell(d, 0, row, "Trades / Win%", text_color = color.new(color.gray, 20), text_halign = text.align_left, text_size = size.small)
         table.cell(d, 1, row, trades_winrate_display, text_color = color.new(color.gray, 20), text_size = size.small)
         row += 1
+
+//======================================================================
+// ALERTS
+//======================================================================
+// Static alertcondition entries (per spec: SELL, BUY, T1, T2, STOP — no
+// separate TIME alertcondition, matching the phase spec's exact list).
+// T1/T2/STOP OR the two directions together since either side touching
+// that exit level is the same alertable event.
+alertcondition(signal_sell, title = "SELL", message = "SELL")
+alertcondition(signal_buy, title = "BUY", message = "BUY")
+alertcondition(exit_t1_bear or exit_t1_bull, title = "T1", message = "T1")
+alertcondition(exit_t2_bear or exit_t2_bull, title = "T2", message = "T2")
+alertcondition(exit_stop_bear or exit_stop_bull, title = "STOP", message = "STOP")
+
+// Dynamic alert() on entry — one multi-chart alert setup can drive every
+// monitored symbol off this single call, since the message carries the
+// ticker itself.
+if signal_sell
+    alert("ICARUS SELL " + syminfo.ticker + " | Entry " + str.tostring(entry_price_bear, format.mintick) +
+         " | Stop " + str.tostring(stop_bear, format.mintick), alert.freq_once_per_bar_close)
+
+if signal_buy
+    alert("ICARUS BUY " + syminfo.ticker + " | Entry " + str.tostring(entry_price_bull, format.mintick) +
+         " | Stop " + str.tostring(stop_bull, format.mintick), alert.freq_once_per_bar_close)
