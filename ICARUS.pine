@@ -1,0 +1,336 @@
+//@version=6
+indicator("ICARUS V0", overlay = true, max_labels_count = 500, max_lines_count = 50)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+grp = "ICARUS"
+
+minVwapDist    = input.float(2.0, "Min Distance from VWAP (%)", minval = 0.5, maxval = 10.0, step = 0.1, group = grp)
+swingLookback  = input.int(5, "Swing Strength", minval = 2, maxval = 15, group = grp)
+rvolBreak      = input.float(2.0, "Break Bar RVOL", minval = 1.0, maxval = 5.0, step = 0.1, group = grp)
+confirmMaxBars = input.int(8, "Max Bars to Confirm", minval = 2, maxval = 20, group = grp)
+stopBufferPct  = input.float(0.15, "Stop Buffer Above Bounce (%)", minval = 0.0, maxval = 1.0, step = 0.05, group = grp)
+timeStopBars   = input.int(40, "Time Stop (bars)", minval = 0, maxval = 200, group = grp)
+useLockout     = input.bool(true, "Trend-Day Lockout", group = grp)
+showDash       = input.bool(true, "Show Dashboard", group = grp)
+showLevels     = input.bool(true, "Show Swing Levels", group = grp)
+
+// ============================================================================
+// PHASE 1 — SESSION / VWAP / SWING STRUCTURE
+// ============================================================================
+
+// --- RTH session state ---------------------------------------------------
+// Day-change (not just the rth_active false->true toggle) is required here:
+// on an RTH-only chart (TradingView's default for stocks) every loaded bar
+// is already inside the session, so the toggle never fires past bar 0.
+rth_active  = not na(time(timeframe.period, "0930-1600", "America/New_York"))
+new_day     = na(dayofmonth[1]) or dayofmonth != dayofmonth[1]
+is_new_range = rth_active and (new_day or not rth_active[1])
+
+var float session_open_price = na
+var float session_high = na
+var float session_low = na
+
+if is_new_range
+    session_open_price := open
+    session_high := high
+    session_low := low
+else if rth_active
+    session_high := math.max(session_high, high)
+    session_low := math.min(session_low, low)
+
+// --- RTH-anchored VWAP (manual, not ta.vwap — that anchors overnight on futures) ---
+var float cum_pv = 0.0
+var float cum_vol = 0.0
+
+if is_new_range
+    cum_pv := hlc3 * volume
+    cum_vol := volume
+else if rth_active
+    cum_pv := cum_pv + hlc3 * volume
+    cum_vol := cum_vol + volume
+
+vwap = cum_vol > 0 ? cum_pv / cum_vol : na
+
+// --- Supporting series -----------------------------------------------------
+rel_vol = volume / ta.sma(volume, 20)
+atr     = ta.atr(14)
+ema20   = ta.ema(close, 20)
+[diplus, diminus, adx] = ta.dmi(14, 14)
+
+// --- Manual confirmed swing structure ---------------------------------------
+// A swing at bar_index - swingLookback becomes knowable only once the
+// swingLookback bars AFTER it have closed, i.e. swingLookback bars later than
+// the candidate bar itself. Never compare close against a swing on the same
+// bar it is confirmed — it describes a bar swingLookback in the past.
+var float last_swing_high = na
+var float last_swing_low  = na
+
+candidate_high = high[swingLookback]
+candidate_low  = low[swingLookback]
+
+has_history = bar_index >= swingLookback * 2
+
+is_swing_high = has_history
+is_swing_low  = has_history
+
+if has_history
+    for i = 1 to swingLookback
+        if high[swingLookback - i] >= candidate_high   // bars AFTER the candidate
+            is_swing_high := false
+        if high[swingLookback + i] > candidate_high    // bars BEFORE the candidate
+            is_swing_high := false
+        if low[swingLookback - i] <= candidate_low     // bars AFTER the candidate
+            is_swing_low := false
+        if low[swingLookback + i] < candidate_low      // bars BEFORE the candidate
+            is_swing_low := false
+
+if is_swing_high and barstate.isconfirmed
+    last_swing_high := candidate_high
+
+if is_swing_low and barstate.isconfirmed
+    last_swing_low := candidate_low
+
+// --- Plots -------------------------------------------------------------
+plot(showLevels ? last_swing_high : na, "Swing High", color.new(color.red, 0), style = plot.style_stepline)
+plot(showLevels ? last_swing_low : na, "Swing Low", color.new(color.lime, 0), style = plot.style_stepline)
+plot(rth_active ? vwap : na, "VWAP", color.new(color.orange, 0), linewidth = 2)
+
+// ============================================================================
+// PHASE 2 — STATE MACHINE AND SIGNAL
+// ============================================================================
+
+vwap_dist_pct  = na(vwap) ? na : (close - vwap) / vwap * 100
+stretched_bear = not na(vwap_dist_pct) and vwap_dist_pct >= minVwapDist
+stretched_bull = not na(vwap_dist_pct) and vwap_dist_pct <= -minVwapDist
+
+// --- Break reference: the extreme bar of the CURRENT stretched excursion ---
+// last_swing_high/low (Phase 1) can sit far outside the stretch band on a
+// single-leg move (no intervening bounce ever confirms a nearby swing), which
+// makes the break condition geometrically impossible to satisfy at the same
+// time as "stretched" — see ICARUS_CLAUDE.md discussion. Track the excursion's
+// own extreme bar instead: its opposite-side wick is always inside reach.
+// The anchor is captured while stretched, but the reclaim bar itself is
+// expected to no longer be stretched — that is what "reclaim" means. So the
+// anchor must survive after stretched_bull/bear goes false; it only resets on
+// a new session (stale) or once it has been used to arm (below).
+var float stretch_bull_low      = na
+var float stretch_bull_low_high = na
+var float stretch_bear_high     = na
+var float stretch_bear_high_low = na
+
+if is_new_range
+    stretch_bull_low := na
+    stretch_bull_low_high := na
+    stretch_bear_high := na
+    stretch_bear_high_low := na
+
+if stretched_bull and (na(stretch_bull_low) or low < stretch_bull_low)
+    stretch_bull_low := low
+    stretch_bull_low_high := high
+
+if stretched_bear and (na(stretch_bear_high) or high > stretch_bear_high)
+    stretch_bear_high := high
+    stretch_bear_high_low := low
+
+// --- Trend-day lockout (percentage of session open, not ATR-based — see spec) ---
+// in_top_20/in_bottom_20 use the running session high/low, so the bar that
+// MAKES a new extreme is trivially "at the extreme." A sticky for-the-session
+// latch (the spec's literal design) can't distinguish a genuine trend day from
+// an early flush that fully recovers — both look identical at the moment of
+// the extreme. So this is a LIVE condition, re-evaluated every bar, not a
+// latch: it requires the extreme to have persisted for a few bars (filtering
+// a single spike) but drops out again once price has clearly moved away.
+session_range_pct = session_open_price > 0 ? (session_high - session_low) / session_open_price * 100 : 0.0
+range_span         = session_high - session_low
+in_top_20    = range_span > 0 and (close - session_low) / range_span >= 0.80
+in_bottom_20 = range_span > 0 and (close - session_low) / range_span <= 0.20
+
+var int extremePersistBars = 5
+
+var int top_20_run    = 0
+var int bottom_20_run = 0
+
+if is_new_range
+    top_20_run := 0
+    bottom_20_run := 0
+
+if barstate.isconfirmed
+    top_20_run    := in_top_20 ? top_20_run + 1 : 0
+    bottom_20_run := in_bottom_20 ? bottom_20_run + 1 : 0
+
+bear_locked_out = useLockout and session_range_pct > 2.5 and top_20_run >= extremePersistBars and adx > 30
+bull_locked_out = useLockout and session_range_pct > 2.5 and bottom_20_run >= extremePersistBars and adx > 30
+
+// --- Bear (SELL) setup state ---
+var bool  armed_bear          = false
+var int   break_bar_index_bear = na
+var float break_bar_high_bear  = na
+var float bounce_high_bear     = na
+var bool  bounce_seen_bear     = false
+var float entry_price_sell     = na
+var float sell_bounce_high     = na
+
+// --- Bull (BUY) setup state ---
+var bool  armed_bull          = false
+var int   break_bar_index_bull = na
+var float break_bar_low_bull   = na
+var float bounce_low_bull      = na
+var bool  bounce_seen_bull     = false
+var float entry_price_buy      = na
+var float buy_bounce_low       = na
+
+// --- Open-position state (Phase 3) ---
+var bool   in_position   = false
+var string pos_side      = na    // "short" or "long"
+var float  pos_entry     = na
+var float  pos_stop      = na
+var int    pos_entry_bar = na
+
+signal_sell = false
+signal_buy  = false
+exit_tgt = false
+exit_stop = false
+exit_time = false
+exit_price = float(na)
+
+if barstate.isconfirmed
+    // ---- manage open position: stop / target / time exit ----
+    // Only one of TGT/STOP/TIME can fire per bar; checked in this priority
+    // order since a single bar's OHLC can't tell us which was touched first —
+    // stop-first is the conservative assumption.
+    if in_position
+        bars_in_trade = bar_index - pos_entry_bar
+        if pos_side == "short"
+            if high >= pos_stop
+                exit_stop := true
+                exit_price := pos_stop
+            else if low <= vwap
+                exit_tgt := true
+                exit_price := vwap
+            else if bars_in_trade >= timeStopBars
+                exit_time := true
+                exit_price := close
+        else if pos_side == "long"
+            if low <= pos_stop
+                exit_stop := true
+                exit_price := pos_stop
+            else if high >= vwap
+                exit_tgt := true
+                exit_price := vwap
+            else if bars_in_trade >= timeStopBars
+                exit_time := true
+                exit_price := close
+
+        if exit_stop or exit_tgt or exit_time
+            realized_pct = pos_side == "short" ? (pos_entry - exit_price) / pos_entry * 100 : (exit_price - pos_entry) / pos_entry * 100
+            exit_text = (exit_tgt ? "TGT " : exit_stop ? "STOP " : "TIME ") + str.tostring(realized_pct, "#.##") + "%"
+            exit_color = exit_tgt ? color.blue : color.gray
+            label.new(bar_index, pos_side == "short" ? high : low, exit_text, yloc = pos_side == "short" ? yloc.abovebar : yloc.belowbar, style = pos_side == "short" ? label.style_label_down : label.style_label_up, color = color.new(exit_color, 0), textcolor = color.white, size = size.small)
+            in_position := false
+            pos_side := na
+
+    // ---- manage existing bear arm: bounce tracking / cancel / confirm ----
+    if armed_bear
+        bounce_high_bear := math.max(bounce_high_bear, high)
+        bars_since_break_bear = bar_index - break_bar_index_bear
+        cancel_bear = bars_since_break_bear > confirmMaxBars or close > break_bar_high_bear or not rth_active
+        if cancel_bear
+            armed_bear := false
+        else
+            if close > open
+                bounce_seen_bear := true
+            confirm_bear = bounce_seen_bear and bounce_high_bear < break_bar_high_bear and close < open and close < low[1] and bars_since_break_bear <= confirmMaxBars and not bear_locked_out and not in_position
+            if confirm_bear
+                signal_sell := true
+                entry_price_sell := close
+                sell_bounce_high := bounce_high_bear
+                armed_bear := false
+                in_position := true
+                pos_side := "short"
+                pos_entry := close
+                pos_stop := bounce_high_bear * (1 + stopBufferPct / 100)
+                pos_entry_bar := bar_index
+
+    // ---- new bear break (arming one cancels the other) ----
+    // Not requiring stretched_bear on this bar too: the break bar is the one
+    // that reclaims (closes below) the stretch-high bar's low — by definition
+    // that reclaim itself pulls price back toward vwap, out of the stretch band.
+    if not armed_bear and not na(stretch_bear_high_low) and close < stretch_bear_high_low and rel_vol >= rvolBreak and close < ema20 and not bear_locked_out
+        armed_bear := true
+        armed_bull := false
+        break_bar_index_bear := bar_index
+        break_bar_high_bear := stretch_bear_high
+        bounce_high_bear := high
+        bounce_seen_bear := false
+        stretch_bear_high := na
+        stretch_bear_high_low := na
+
+    // ---- manage existing bull arm: bounce tracking / cancel / confirm ----
+    if armed_bull
+        bounce_low_bull := math.min(bounce_low_bull, low)
+        bars_since_break_bull = bar_index - break_bar_index_bull
+        cancel_bull = bars_since_break_bull > confirmMaxBars or close < break_bar_low_bull or not rth_active
+        if cancel_bull
+            armed_bull := false
+        else
+            if close < open
+                bounce_seen_bull := true
+            confirm_bull = bounce_seen_bull and bounce_low_bull > break_bar_low_bull and close > open and close > high[1] and bars_since_break_bull <= confirmMaxBars and not bull_locked_out and not in_position
+            if confirm_bull
+                signal_buy := true
+                entry_price_buy := close
+                buy_bounce_low := bounce_low_bull
+                armed_bull := false
+                in_position := true
+                pos_side := "long"
+                pos_entry := close
+                pos_stop := bounce_low_bull * (1 - stopBufferPct / 100)
+                pos_entry_bar := bar_index
+
+    // ---- new bull break (arming one cancels the other) ----
+    // Not requiring stretched_bull on this bar too: the break bar is the one
+    // that reclaims (closes above) the stretch-low bar's high — by definition
+    // that reclaim itself pulls price back toward vwap, out of the stretch band.
+    if not armed_bull and not na(stretch_bull_low_high) and close > stretch_bull_low_high and rel_vol >= rvolBreak and close > ema20 and not bull_locked_out
+        armed_bull := true
+        armed_bear := false
+        break_bar_index_bull := bar_index
+        break_bar_low_bull := stretch_bull_low
+        bounce_low_bull := low
+        bounce_seen_bull := false
+        stretch_bull_low := na
+        stretch_bull_low_high := na
+
+// --- Labels ---
+if signal_sell
+    label.new(bar_index, low, "SELL ⚡", yloc = yloc.belowbar, style = label.style_label_up, color = color.new(color.red, 0), textcolor = color.white, size = size.small)
+
+if signal_buy
+    label.new(bar_index, high, "BUY ⚡", yloc = yloc.abovebar, style = label.style_label_down, color = color.new(color.green, 0), textcolor = color.white, size = size.small)
+
+// ============================================================================
+// PHASE 3 — DASHBOARD AND ALERTS
+// ============================================================================
+
+alertcondition(signal_buy, "ICARUS BUY", "ICARUS: BUY signal")
+alertcondition(signal_sell, "ICARUS SELL", "ICARUS: SELL signal")
+
+if showDash and barstate.islast
+    var table dash = table.new(position.bottom_right, 2, 6, bgcolor = color.new(color.black, 80), border_width = 1, border_color = color.gray)
+
+    state_text = in_position ? (pos_side == "short" ? "🎯 SHORT" : "🎯 LONG") : armed_bear ? "⚡ ARMED " + str.tostring(bar_index - break_bar_index_bear) + "/" + str.tostring(confirmMaxBars) : armed_bull ? "⚡ ARMED " + str.tostring(bar_index - break_bar_index_bull) + "/" + str.tostring(confirmMaxBars) : (bear_locked_out or bull_locked_out) ? "🔒 LOCKED OUT" : (stretched_bear or stretched_bull) ? "STRETCHED (" + str.tostring(vwap_dist_pct, "#.#") + "%)" : "FLAT"
+
+    pos_text = in_position ? "E " + str.tostring(pos_entry, "#.##") + " S " + str.tostring(pos_stop, "#.##") + " T " + str.tostring(vwap, "#.##") + "  " + str.tostring(pos_side == "short" ? (pos_entry - close) / pos_entry * 100 : (close - pos_entry) / pos_entry * 100, "#.##") + "%" : "—"
+
+    table.cell(dash, 0, 0, "ICARUS V0", text_color = color.white, bgcolor = color.new(color.blue, 60))
+    table.cell(dash, 1, 0, "", bgcolor = color.new(color.blue, 60))
+    table.cell(dash, 0, 1, "State", text_color = color.white)
+    table.cell(dash, 1, 1, state_text, text_color = color.white)
+    table.cell(dash, 0, 2, "VWAP Dist", text_color = color.white)
+    table.cell(dash, 1, 2, str.tostring(vwap_dist_pct, "#.##") + "%", text_color = (stretched_bear or stretched_bull) ? color.lime : color.white)
+    table.cell(dash, 0, 3, "Swing Low / High", text_color = color.white)
+    table.cell(dash, 1, 3, str.tostring(last_swing_low, "#.##") + " / " + str.tostring(last_swing_high, "#.##"), text_color = color.white)
+    table.cell(dash, 0, 4, "Position", text_color = color.white)
+    table.cell(dash, 1, 4, pos_text, text_color = color.white)
