@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Status: Phase 6 of an 8-phase build. This document will be filled out fully at Phase 8 — it currently
+**Status: Phase 7 of an 8-phase build. This document will be filled out fully at Phase 8 — it currently
 covers only what exists in the code today.**
 
 ## Project Overview
@@ -114,8 +114,14 @@ here it is a prerequisite.
     `trade_r_results_long`/`_short` (FIFO-capped at 50); Avg R is the headline dashboard metric, win rate
     secondary. See [ATR Bracket Design Notes](#atr-bracket-design-notes) below.
 
-Not yet implemented (later phases): full state-machine dashboard (this document's scaffold dashboard
-stays in place until Phase 7 replaces it), alerts.
+16. **Dashboard** — the full 18-row state-machine dashboard (replaces the scaffold used through Phases
+    0-6): Header, Profile, State (now including 🎯 IN TRADE, which outranks ARMED), Extension,
+    Structure, Retracement, Vetoes, Position as fixed base rows; a separator, Swing H/L, RVOL, ADX,
+    HTF Bias, Bars Since Break, a separator, Avg R — LONG, Avg R — SHORT, and Trades/Win% under
+    Extended Metrics. See [Dashboard Row Layout](#dashboard-row-layout) below for the exact row map and
+    what was dropped from the scaffold.
+
+Not yet implemented (later phases): alerts.
 
 ---
 
@@ -263,6 +269,44 @@ churn/edge cases that conditional `request.security` calls can trigger.
   one realized R multiple, flip `in_position_*` false, and clear `b_fired`/`s_fired` so the next
   qualifying signal can fire. There is no partial-exit/scaling model — whichever of T1/T2/STOP/TIME
   touches first closes the entire (notional) trade for R-tracking purposes.
+
+**Dashboard Row Layout:** all rows are fixed-count (no variable-length loop like SuperLazyTrade's
+gate-detail word-wrap), so no `if row >= DASHBOARD_MAX_ROWS: break` guard is needed anywhere in this
+dashboard — every combination of inputs produces exactly the same 18 rows (0-17) when Extended Metrics is
+on, or 8 rows (0-7) when it's off. Both are far under `DASHBOARD_MAX_ROWS = 24`.
+
+| Row | Label | Notes |
+|-----|-------|-------|
+| 0 | Header (merged) | `ICARUS V1 \| <short state>` |
+| 1 | Profile | |
+| 2 | State | `UNQUALIFIED` / `TRENDING ↑↓` / `⚡ ARMED` / `🎯 IN TRADE` |
+| 3 | Extension | active direction vs `ext_min`, falls back to `max(bear, bull)` when neither side is active |
+| 4 | Structure | `HH/HL ↑` / `LH/LL ↓` / `NEUTRAL` |
+| 5 | Retracement | only meaningful while armed; `—` otherwise |
+| 6 | Vetoes | |
+| 7 | Position | |
+| 8 | separator | extDash only |
+| 9 | Swing H/L | extDash only |
+| 10 | RVOL | extDash only |
+| 11 | ADX + rising | extDash only |
+| 12 | HTF Bias | extDash only |
+| 13 | Bars Since Break | extDash only |
+| 14 | separator | extDash only |
+| 15 | Avg R — LONG | extDash only |
+| 16 | Avg R — SHORT | extDash only |
+| 17 | Trades / Win% | extDash only, secondary/dimmed |
+
+**Dropped from the scaffold:** the Phase 0 "Session Anchor" row (anchor mode + timestamp) is not in the
+Phase 7 spec's row list and has been removed — the scaffold dashboard was explicitly temporary
+("replaced by the full dashboard in Phase 7" was noted in every phase's dashboard comment). Anchor
+sanity-checking is still indirectly possible via the Extension row (it should read near zero at 09:35 on
+RTH-anchored futures), just without the explicit timestamp readout. `session_open_time` is still tracked
+internally (harmless, unused elsewhere) in case a future phase wants it back.
+
+**IN TRADE outranks ARMED, which outranks TRENDING:** this priority chain is safe to treat as
+non-overlapping rather than a tie-break, because entering a trade (Phase 6) clears the corresponding
+`break_armed_*` flag in the same bar the entry fires — `in_position_*` and `break_armed_*` for the same
+direction are never simultaneously true by construction.
 
 **Extension is a prerequisite, not a penalty:** the inverse of SuperLazyTrade's Gate 2 (Stretch). Do not
 port stretch-penalty logic across — a large `ext_min` reading here *qualifies* a setup rather than

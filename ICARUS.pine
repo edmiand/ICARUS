@@ -867,17 +867,32 @@ if exit_time_bull
     label.new(bar_index, close, "TIME", yloc = yloc.price, style = label.style_label_up, color = color.new(color.gray, 0), textcolor = color.white, size = size.small)
 
 //======================================================================
-// DASHBOARD (SCAFFOLD)
+// DASHBOARD
 //======================================================================
-// This is a minimal placeholder so each phase's work is visible on a
-// chart for manual verification. The full state-machine dashboard
-// (State, Structure, Retracement, Vetoes, Position, R stats) is built
-// in Phase 7 and will replace this block.
+// table.new at bottom_right, black bg, small text, left-aligned labels,
+// merged header — matching SuperLazyTrade's visual style. Rendered only
+// on barstate.islast. Row order follows the phase spec exactly (rows
+// 1-8 base, 9-18 extended); see ICARUS_CLAUDE.md for the full layout
+// and the worst-case row count.
 if showDash and barstate.islast
     var table d = table.new(position.bottom_right, 2, DASHBOARD_MAX_ROWS,
          bgcolor = color.new(color.black, 0), border_width = 1)
 
-    string header_text = "ICARUS " + VERSION + " | SCAFFOLD"
+    // Direction priority shared by several rows below: an open trade
+    // outranks an armed break, which outranks a qualified trend, which
+    // outranks nothing. In_position and break_armed are mutually
+    // exclusive by construction (entering a trade clears the arm), so
+    // this is a clean, non-overlapping chain rather than a tie-break.
+    bool showing_bear = in_position_bear or break_armed_bear or trend_qualified_bear
+    bool showing_bull = in_position_bull or break_armed_bull or trend_qualified_bull
+
+    string header_state = in_position_bear or in_position_bull ? "IN TRADE" :
+         break_armed_bear or break_armed_bull ? "ARMED" :
+         trend_qualified_bear or trend_qualified_bull ? "TRENDING" :
+         "UNQUALIFIED"
+
+    // Row 1: Header
+    string header_text = "ICARUS " + VERSION + " | " + header_state
     string fixed_header = header_text + str.substring(DASH_WIDTH, 0, math.max(0, 40 - str.length(header_text)))
     table.cell(d, 0, 0, fixed_header,
          text_color = color.white,
@@ -888,33 +903,73 @@ if showDash and barstate.islast
 
     int row = 1
 
+    // Row 2: Profile
     table.cell(d, 0, row, "Profile", text_color = color.white, text_halign = text.align_left, text_size = size.small)
     table.cell(d, 1, row, profile_name, text_color = color.white, text_size = size.small)
     row += 1
 
-    // State machine display — ARMED takes priority over TRENDING (an arm
-    // can coexist with a stale or already-reset qualification latch, per
-    // the Phase 3 design note above), which takes priority over
-    // UNQUALIFIED. No arrow on ARMED, matching the eventual Phase 7 format
-    // ("⚡ ARMED (bar 3/8)"); direction is conveyed by color only. The
-    // TRENDING arrow shows the underlying trend direction being watched
-    // (↑ = uptrend, watching for a bearish unwind; ↓ = downtrend, watching
-    // for a bullish snapback). Where both bear/bull latches could
+    // Row 3: State — IN TRADE > ARMED > TRENDING > UNQUALIFIED. No arrow
+    // on ARMED/IN TRADE (direction conveyed by color only); the TRENDING
+    // arrow shows the underlying trend direction being watched (↑ =
+    // uptrend, watching for a bearish unwind; ↓ = downtrend, watching for
+    // a bullish snapback). Where both bear/bull latches could
     // theoretically be true at once, bear takes display priority — a
     // deterministic tie-break, not expected in normal operation.
-    string icarus_state = break_armed_bear ? "⚡ ARMED (bar " + str.tostring(bar_index - break_bar_index_bear) + "/" + str.tostring(confirmMaxBars) + ")" :
+    string icarus_state = in_position_bear ? "🎯 IN TRADE (SELL)" :
+         in_position_bull ? "🎯 IN TRADE (BUY)" :
+         break_armed_bear ? "⚡ ARMED (bar " + str.tostring(bar_index - break_bar_index_bear) + "/" + str.tostring(confirmMaxBars) + ")" :
          break_armed_bull ? "⚡ ARMED (bar " + str.tostring(bar_index - break_bar_index_bull) + "/" + str.tostring(confirmMaxBars) + ")" :
          trend_qualified_bear ? "TRENDING ↑ (" + str.tostring(bear_trend_extension_atr, "#.#") + " ATR)" :
          trend_qualified_bull ? "TRENDING ↓ (" + str.tostring(bull_trend_extension_atr, "#.#") + " ATR)" :
          "UNQUALIFIED"
-    color state_color = break_armed_bear or break_armed_bull ? color.orange :
+    color state_color = in_position_bear ? color.red : in_position_bull ? color.lime :
+         break_armed_bear or break_armed_bull ? color.orange :
          trend_qualified_bear ? color.red : trend_qualified_bull ? color.lime : color.gray
     table.cell(d, 0, row, "State", text_color = color.white, text_halign = text.align_left, text_size = size.small)
     table.cell(d, 1, row, icarus_state, text_color = state_color, text_size = size.small)
     row += 1
 
-    // Active vetoes, by name — direction-tagged where a veto only blocks
-    // one side (Trend-Day Lockout, HTF); Time Gate blocks both.
+    // Row 4: Extension — the active direction's session extension vs
+    // ext_min. When nothing is active, falls back to whichever raw
+    // extension (bear/bull) is larger, still useful for calibration.
+    float active_extension = showing_bear ? bear_trend_extension_atr : showing_bull ? bull_trend_extension_atr :
+         math.max(bear_trend_extension_atr, bull_trend_extension_atr)
+    string extension_display = str.tostring(active_extension, "#.##") + " / " + str.tostring(ext_min, "#.#") + " ATR min"
+    color extension_color = active_extension >= ext_min ? color.lime : color.gray
+    table.cell(d, 0, row, "Extension", text_color = color.white, text_halign = text.align_left, text_size = size.small)
+    table.cell(d, 1, row, extension_display, text_color = extension_color, text_size = size.small)
+    row += 1
+
+    // Row 5: Structure
+    string structure_display = structure_bullish ? "HH/HL ↑" : structure_bearish ? "LH/LL ↓" : "NEUTRAL"
+    table.cell(d, 0, row, "Structure", text_color = color.white, text_halign = text.align_left, text_size = size.small)
+    table.cell(d, 1, row, structure_display, text_color = color.white, text_size = size.small)
+    row += 1
+
+    // Row 6: Retracement — only meaningful while a break is armed
+    // (watching for confirmation); "—" otherwise.
+    float retrace_depth_bear_live = session_range > 0 ? (session_high - close) / session_range : na
+    float retrace_depth_bull_live = session_range > 0 ? (close - session_low) / session_range : na
+    string retrace_display = ""
+    color retrace_color = color.gray
+    if break_armed_bear and not na(retrace_depth_bear_live)
+        bool bear_in_window = retrace_depth_bear_live >= retrace_min and retrace_depth_bear_live <= retrace_max
+        retrace_display := str.tostring(retrace_depth_bear_live * 100, "#.#") + "% " +
+             (bear_in_window ? "✅ IN WINDOW" : retrace_depth_bear_live < retrace_min ? "⚠️ TOO SHALLOW" : "⚠️ TOO DEEP")
+        retrace_color := bear_in_window ? color.lime : color.orange
+    else if break_armed_bull and not na(retrace_depth_bull_live)
+        bool bull_in_window = retrace_depth_bull_live >= retrace_min and retrace_depth_bull_live <= retrace_max
+        retrace_display := str.tostring(retrace_depth_bull_live * 100, "#.#") + "% " +
+             (bull_in_window ? "✅ IN WINDOW" : retrace_depth_bull_live < retrace_min ? "⚠️ TOO SHALLOW" : "⚠️ TOO DEEP")
+        retrace_color := bull_in_window ? color.lime : color.orange
+    else
+        retrace_display := "—"
+    table.cell(d, 0, row, "Retracement", text_color = color.white, text_halign = text.align_left, text_size = size.small)
+    table.cell(d, 1, row, retrace_display, text_color = retrace_color, text_size = size.small)
+    row += 1
+
+    // Row 7: Vetoes — active veto names, direction-tagged where a veto
+    // only blocks one side (Trend-Day Lockout, HTF); Time Gate blocks both.
     string veto_message = ""
     if useTrendDayLockout and bear_locked_out
         veto_message += "TREND-DAY LOCK (SELL) "
@@ -934,9 +989,9 @@ if showDash and barstate.islast
     table.cell(d, 1, row, veto_display, text_color = veto_color, text_size = size.small)
     row += 1
 
-    // Position — entry/stop/T1/T2/current R for the open trade, or FLAT.
-    // ⚠FLOOR flags a stop widened by the minTickStop tick floor, per
-    // Phase 6's explicit "flag it on the dashboard" requirement.
+    // Row 8: Position — entry/stop/T1/T2/current R for the open trade, or
+    // FLAT. ⚠FLOOR flags a stop widened by the minTickStop tick floor,
+    // per Phase 6's explicit "flag it on the dashboard" requirement.
     float current_r_bear = in_position_bear and risk_bear > 0 ? (entry_price_bear - close) / risk_bear : na
     float current_r_bull = in_position_bull and risk_bull > 0 ? (close - entry_price_bull) / risk_bull : na
     string position_display = in_position_bear ?
@@ -957,44 +1012,68 @@ if showDash and barstate.islast
     table.cell(d, 1, row, position_display, text_color = position_color, text_size = size.small)
     row += 1
 
-    table.cell(d, 0, row, "RVOL", text_color = color.white, text_halign = text.align_left, text_size = size.small)
-    table.cell(d, 1, row, str.tostring(rel_vol, "#.##") + "x " + rvol_mode_label, text_color = color.white, text_size = size.small)
-    row += 1
-
     if extDash
-        // Anchor + timestamp — lets a mis-anchored futures chart be caught
-        // at a glance instead of silently producing inflated extension.
-        string anchor_ts = not na(session_open_time) ? str.format_time(session_open_time, "MM-dd HH:mm", "America/New_York") : "—"
-        table.cell(d, 0, row, "Session Anchor", text_color = color.gray, text_halign = text.align_left, text_size = size.small)
-        table.cell(d, 1, row, rangeAnchor + " @ " + anchor_ts, text_color = color.white, text_size = size.small)
+        // Row 9: separator
+        table.cell(d, 0, row, "─────────────────────", text_color = color.new(color.gray, 60), text_size = size.small)
+        table.merge_cells(d, 0, row, 1, row)
         row += 1
 
-        // Raw extension figure (session_high side only, direction-agnostic
-        // — kept from Phase 0 for anchor verification independent of
-        // qualification state). Verify this reads near zero at 09:35 on
-        // ES/SI before trusting anything built on top of it.
-        string ext_display = (not na(atr_daily) and atr_daily > 0 and not na(session_open_price)) ?
-             str.tostring((session_high - session_open_price) / atr_daily, "#.##") + " ATR (open " +
-             str.tostring(session_open_price, format.mintick) + ")" : "—"
-        table.cell(d, 0, row, "Extension (raw)", text_color = color.gray, text_halign = text.align_left, text_size = size.small)
-        table.cell(d, 1, row, ext_display, text_color = color.white, text_size = size.small)
+        // Row 10: Swing High / Swing Low levels
+        string swing_display = (not na(last_swing_high) and not na(last_swing_low)) ?
+             "H " + str.tostring(last_swing_high, format.mintick) + " / L " + str.tostring(last_swing_low, format.mintick) : "—"
+        table.cell(d, 0, row, "Swing H/L", text_color = color.gray, text_halign = text.align_left, text_size = size.small)
+        table.cell(d, 1, row, swing_display, text_color = color.white, text_size = size.small)
         row += 1
 
-        // R-multiple stats, tracked long/short separately — Avg R is the
-        // headline (== expectancy); win rate rides along as a secondary
-        // figure in the same cell rather than its own prominent row.
-        string avg_r_long_display = total_long > 0 ?
-             str.tostring(avg_r_long, "+#.##;-#.##") + "R (" + str.tostring(total_long) + " trades, " +
-             str.tostring(win_rate_long, "#.#") + "% win)" : "— (0 trades)"
+        // Row 11: RVOL (with TOD / 20-bar / 20-bar* mode label, same as SuperLazyTrade)
+        table.cell(d, 0, row, "RVOL", text_color = color.gray, text_halign = text.align_left, text_size = size.small)
+        table.cell(d, 1, row, str.tostring(rel_vol, "#.##") + "x " + rvol_mode_label, text_color = color.white, text_size = size.small)
+        row += 1
+
+        // Row 12: ADX + rising state
+        string adx_display = str.tostring(adx, "#.#") + (adx_rising_3 ? " ↑ rising" : " flat/falling")
+        table.cell(d, 0, row, "ADX", text_color = color.gray, text_halign = text.align_left, text_size = size.small)
+        table.cell(d, 1, row, adx_display, text_color = color.white, text_size = size.small)
+        row += 1
+
+        // Row 13: HTF bias
+        string htf_bias_display = (htf_bullish ? "BULLISH" : htf_bearish ? "BEARISH" : "NEUTRAL") + " (" + htfTimeframe + ")"
+        color htf_bias_color = htf_bullish ? color.lime : htf_bearish ? color.red : color.gray
+        table.cell(d, 0, row, "HTF Bias", text_color = color.gray, text_halign = text.align_left, text_size = size.small)
+        table.cell(d, 1, row, htf_bias_display, text_color = htf_bias_color, text_size = size.small)
+        row += 1
+
+        // Row 14: Bars since break (when armed)
+        string bars_since_break_display = break_armed_bear ? str.tostring(bar_index - break_bar_index_bear) + " / " + str.tostring(confirmMaxBars) :
+             break_armed_bull ? str.tostring(bar_index - break_bar_index_bull) + " / " + str.tostring(confirmMaxBars) : "—"
+        table.cell(d, 0, row, "Bars Since Break", text_color = color.gray, text_halign = text.align_left, text_size = size.small)
+        table.cell(d, 1, row, bars_since_break_display, text_color = color.white, text_size = size.small)
+        row += 1
+
+        // Row 15: separator
+        table.cell(d, 0, row, "─────────────────────", text_color = color.new(color.gray, 60), text_size = size.small)
+        table.merge_cells(d, 0, row, 1, row)
+        row += 1
+
+        // Row 16: Avg R — LONG (headline metric == expectancy)
+        string avg_r_long_display = total_long > 0 ? str.tostring(avg_r_long, "+#.##;-#.##") + "R" : "—"
         color avg_r_long_color = na(avg_r_long) ? color.new(color.gray, 40) : avg_r_long >= 0 ? color.lime : color.red
         table.cell(d, 0, row, "Avg R — LONG", text_color = color.gray, text_halign = text.align_left, text_size = size.small)
         table.cell(d, 1, row, avg_r_long_display, text_color = avg_r_long_color, text_size = size.small)
         row += 1
 
-        string avg_r_short_display = total_short > 0 ?
-             str.tostring(avg_r_short, "+#.##;-#.##") + "R (" + str.tostring(total_short) + " trades, " +
-             str.tostring(win_rate_short, "#.#") + "% win)" : "— (0 trades)"
+        // Row 17: Avg R — SHORT
+        string avg_r_short_display = total_short > 0 ? str.tostring(avg_r_short, "+#.##;-#.##") + "R" : "—"
         color avg_r_short_color = na(avg_r_short) ? color.new(color.gray, 40) : avg_r_short >= 0 ? color.lime : color.red
         table.cell(d, 0, row, "Avg R — SHORT", text_color = color.gray, text_halign = text.align_left, text_size = size.small)
         table.cell(d, 1, row, avg_r_short_display, text_color = avg_r_short_color, text_size = size.small)
+        row += 1
+
+        // Row 18: Trades / Win% — secondary line, both directions combined
+        string trades_winrate_display = "L: " + str.tostring(total_long) +
+             " (" + (total_long > 0 ? str.tostring(win_rate_long, "#.#") + "%" : "—") + ")" +
+             " | S: " + str.tostring(total_short) +
+             " (" + (total_short > 0 ? str.tostring(win_rate_short, "#.#") + "%" : "—") + ")"
+        table.cell(d, 0, row, "Trades / Win%", text_color = color.new(color.gray, 20), text_halign = text.align_left, text_size = size.small)
+        table.cell(d, 1, row, trades_winrate_display, text_color = color.new(color.gray, 20), text_size = size.small)
         row += 1
