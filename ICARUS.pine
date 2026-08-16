@@ -35,7 +35,7 @@ type TodSession
 grp_setup = "🎯 Reversal Setup"
 swingLookback = input.int(5, "Swing Pivot Strength", minval = 2, maxval = 15, group = grp_setup,
      tooltip = "Bars required on each side of a bar before its high/low is confirmed as a swing.")
-trendMinBars = input.int(20, "Min Bars in Trend", minval = 5, maxval = 100, group = grp_setup,
+trendMinBars = input.int(8, "Min Bars in Trend", minval = 5, maxval = 100, group = grp_setup, // TEMP: was 20, loosened for signal-frequency debugging
      tooltip = "Minimum bars the qualifying structure must hold before a trend is eligible to break.")
 confirmMaxBars = input.int(8, "Max Bars to Confirm Break", minval = 2, maxval = 20, group = grp_setup,
      tooltip = "Bars allowed between a structure break and its confirmation. If exceeded, the armed break " +
@@ -130,12 +130,15 @@ else if asset_category == "FUND"
 
 else if asset_category == "STOCK"
     profile_name := "STOCK 🚀"
-    ext_min := 3.0
-    atr_break_mult := 1.5
-    rvol_break := 2.2
-    adx_trend_min := 20.0
-    retrace_min := 0.25
-    retrace_max := 0.50
+    // TEMP: loosened from ext_min=3.0, atr_break_mult=1.5, rvol_break=2.2,
+    // adx_trend_min=20.0, retrace_min=0.25, retrace_max=0.50 for signal-
+    // frequency debugging — revert once confirmed the pipeline fires end-to-end.
+    ext_min := 1.5
+    atr_break_mult := 1.1
+    rvol_break := 1.3
+    adx_trend_min := 12.0
+    retrace_min := 0.15
+    retrace_max := 0.65
 
 else if asset_category == "FUTURES"
     profile_name := "FUTURES ⚡"
@@ -831,6 +834,14 @@ calc_r_stats(array<float> arr) =>
 plot(anchored_vwap, "Anchored VWAP", color = color.new(color.blue, 40), linewidth = 1)
 plot(showLevels ? last_swing_high : na, "Last Swing High", color = color.new(color.orange, 0), style = plot.style_stepline, linewidth = 1)
 plot(showLevels ? last_swing_low : na, "Last Swing Low", color = color.new(color.aqua, 0), style = plot.style_stepline, linewidth = 1)
+
+// TEMP DEBUG: pipeline-stage visibility while chasing "no signals ever".
+// Remove once the stall point is identified.
+bgcolor(trend_qualified_bear ? color.new(color.red, 85) : trend_qualified_bull ? color.new(color.lime, 85) : na, title = "DEBUG: Trend Qualified")
+plotchar(structure_bearish, title = "DEBUG: Structure Bearish", char = "▼", location = location.top, size = size.tiny, color = color.red)
+plotchar(structure_bullish, title = "DEBUG: Structure Bullish", char = "▲", location = location.top, size = size.tiny, color = color.lime)
+plotchar(bear_break_trigger, title = "DEBUG: Bear Break Trigger", char = "B", location = location.top, size = size.tiny, color = color.orange)
+plotchar(bull_break_trigger, title = "DEBUG: Bull Break Trigger", char = "B", location = location.top, size = size.tiny, color = color.aqua)
 
 // Break-armed markers — deliberately a small plotshape, distinct from the
 // SELL/SNAPBACK label.new signal markers below.
