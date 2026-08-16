@@ -841,6 +841,16 @@ bgcolor(trend_qualified_bear ? color.new(color.red, 85) : trend_qualified_bull ?
 plotchar(structure_bearish, title = "DEBUG: Structure Bearish", char = "▼", location = location.top, size = size.tiny, color = color.red)
 plotchar(structure_bullish, title = "DEBUG: Structure Bullish", char = "▲", location = location.top, size = size.tiny, color = color.lime)
 plotchar(bear_break_trigger, title = "DEBUG: Bear Break Trigger", char = "B", location = location.top, size = size.tiny, color = color.orange)
+
+// TEMP DEBUG: State-1 sub-condition breakdown for bear_setup_conditions
+// (qualifying an UPTREND as extended enough to fade). Each char plots only
+// while its own condition is true, at a distinct row so a screenshot shows
+// which clause is the blocker.
+plotchar(bull_structure_streak >= trendMinBars, title = "DEBUG: Streak OK (bear setup)", char = "1", location = location.top, size = size.tiny, color = color.fuchsia)
+plotchar(ema9 > ema20 and ema20 > ema50, title = "DEBUG: EMA cascade OK (bear setup)", char = "2", location = location.top, size = size.tiny, color = color.fuchsia)
+plotchar(close > anchored_vwap, title = "DEBUG: Close>VWAP OK (bear setup)", char = "3", location = location.top, size = size.tiny, color = color.fuchsia)
+plotchar(adx >= adx_trend_min, title = "DEBUG: ADX OK (bear setup)", char = "4", location = location.top, size = size.tiny, color = color.fuchsia)
+plotchar(bear_trend_extension_atr >= ext_min, title = "DEBUG: Extension OK (bear setup)", char = "5", location = location.top, size = size.tiny, color = color.fuchsia)
 plotchar(bull_break_trigger, title = "DEBUG: Bull Break Trigger", char = "B", location = location.top, size = size.tiny, color = color.aqua)
 
 // Break-armed markers — deliberately a small plotshape, distinct from the
