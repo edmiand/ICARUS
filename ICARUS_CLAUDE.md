@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Status: Phase 3 of an 8-phase build. This document will be filled out fully at Phase 8 — it currently
+**Status: Phase 4 of an 8-phase build. This document will be filled out fully at Phase 8 — it currently
 covers only what exists in the code today.**
 
 ## Project Overview
@@ -85,9 +85,17 @@ here it is a prerequisite.
     Cancels on timeout (`confirmMaxBars`), on a reclaim past the invalidation reference, or on session
     end. Arming one direction immediately cancels the other (rule 8). No signal fires yet — arming only
     sets up Phase 4's confirmation test.
+13. **State 3: Confirmation and Signal** — from an armed break, tracks the "bounce" (the peak of any
+    green-closing bar since the break, and the low of the bar that set that peak — mirror for bullish),
+    then fires `signal_sell`/`signal_buy` on a confirmed red/green bar that closes below/above the
+    bounce's low/high, within `confirmMaxBars`, with retracement inside `[retrace_min, retrace_max]` of
+    `session_range`. Strict alternation via `b_fired`/`s_fired` (ported from SuperLazyTrade). Records
+    `entry_price_*`/`invalidation_*` for Phase 6. Fires `"SELL ⚡ UNWIND"` / `"BUY ⚡ SNAPBACK"` labels.
+    Vetoes are a `false` placeholder pending Phase 5. See
+    [Bounce Tracking](#bounce-tracking-and-the-lower-high-test) below.
 
-Not yet implemented (later phases): confirmation/signal firing, vetoes, ATR bracket exits, R-multiple
-tracking, full state-machine dashboard, alerts.
+Not yet implemented (later phases): vetoes (wired but inert), ATR bracket exits, R-multiple tracking,
+full state-machine dashboard, alerts.
 
 ---
 
@@ -178,6 +186,23 @@ fields are force-reset in the same bar, before that direction's own arm/cancel b
 same `if barstate.isconfirmed` block. It is not enforced at Phase 2's qualification stage (see
 [Trend Qualification Latch](#trend-qualification-latch)) because qualification is eligibility, not
 commitment — only an armed break is a live setup that would conflict with an opposite-direction one.
+
+**Bounce Tracking and the "Lower High" Test:** the arm's own invalidation check (Phase 3) only cancels on
+a bar *closing* back above `break_bar_high_bear` — an intrabar wick above it does not cancel the arm. That
+means "the bounce peaked below break_bar_high" (Phase 4, condition 2) cannot be assumed true just because
+the arm is still active; it is tracked independently as `bounce_high_bear`, the running max `high` across
+every green-closing bar since the break, paired with `bounce_peak_low_bear` (the low of whichever bar set
+that peak — "the bounce bar's low" from the spec). Tracking resets to a clean slate at the instant of a
+fresh arm (`bear_break_armed_now`), not on cancellation — since Phase 4's tracking loop only ever runs
+while `break_armed_bear` is true, stale values from a cancelled episode are simply never read, so a reset
+on cancel would be redundant.
+
+**Interpretation: what counts as "the bounce".** The spec describes the bounce as a single event ("at
+least one bar... closed green", "the bounce peaked", "the bounce bar's low") but a real bounce can span
+several green bars before rolling over. This implementation tracks the *running peak* across all
+green-closing bars since the break — not just the first one, and not just the most recent one — on the
+reasoning that "the bounce" means the whole rally attempt, and its relevant peak/low pair is whichever bar
+actually set the high. This is a judgment call, not something the spec pins down exactly.
 
 **Extension is a prerequisite, not a penalty:** the inverse of SuperLazyTrade's Gate 2 (Stretch). Do not
 port stretch-penalty logic across — a large `ext_min` reading here *qualifies* a setup rather than

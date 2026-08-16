@@ -518,6 +518,120 @@ if barstate.isconfirmed
             break_extreme_bull := na
 
 //======================================================================
+// STATE 3: CONFIRMATION AND SIGNAL
+//======================================================================
+// From an armed break, confirmation requires a failed bounce: at least
+// one green-closing bar since the break (the "bounce"), whose peak stays
+// below the break bar's high — tracked explicitly here rather than
+// relying on the arm's own invalidation check, because that check only
+// cancels on a CLOSE reclaim (Phase 3), so an intrabar wick above
+// break_bar_high wouldn't have cancelled the arm but would still fail
+// this "lower high" test — followed by a red bar that closes below the
+// low of the bar that set that peak. This costs ~0.3-0.5% of the move
+// versus firing on the break itself, deliberately (rule 3) — it's what
+// prevents "the knife was actually a flag" losses. Mirror for bullish.
+var float bounce_high_bear = na        // peak high of any green-closing bar since the break
+var float bounce_peak_low_bear = na    // low of the bar that set that peak
+var bool  bounce_occurred_bear = false
+
+var float bounce_low_bull = na         // trough low of any red-closing bar since the break
+var float bounce_trough_high_bull = na // high of the bar that set that trough
+var bool  bounce_occurred_bull = false
+
+// Phase 5 vetoes wire into these; both stay false (no-op) until then.
+bool bear_vetoed = false
+bool bull_vetoed = false
+
+// Strict alternation, reusing SuperLazyTrade's b_fired/s_fired pattern:
+// a same-direction signal is blocked until the opposite one fires. Phase
+// 6 will extend the clearing conditions to target/stop/time-stop exits
+// (per the spec's "position is closed" list) — for now only the opposite
+// signal firing, or session end, clears the guard.
+var bool  b_fired = false
+var bool  s_fired = false
+var float entry_price_bear = na
+var float invalidation_bear = na
+var float entry_price_bull = na
+var float invalidation_bull = na
+
+bool signal_buy = false
+bool signal_sell = false
+
+if barstate.isconfirmed
+    // Session end — force the alternation guard open for a fresh entry
+    // next session (Phase 6 owns the actual position-close bookkeeping).
+    if is_new_range
+        b_fired := false
+        s_fired := false
+
+    bool bar_green = close > open
+    bool bar_red = close < open
+
+    if break_armed_bear
+        if bear_break_armed_now
+            // Fresh arm this bar — clear any stale bounce state left over
+            // from a prior (cancelled) armed episode.
+            bounce_high_bear := na
+            bounce_peak_low_bear := na
+            bounce_occurred_bear := false
+        else if bar_green
+            bounce_occurred_bear := true
+            if na(bounce_high_bear) or high > bounce_high_bear
+                bounce_high_bear := high
+                bounce_peak_low_bear := low
+        else if bar_red and bounce_occurred_bear and not na(bounce_peak_low_bear)
+            bool bars_ok_bear = (bar_index - break_bar_index_bear) <= confirmMaxBars
+            bool lower_high_bear = bounce_high_bear < break_bar_high_bear
+            bool closes_below_bounce_low_bear = close < bounce_peak_low_bear
+            float retrace_depth_bear = session_range > 0 ? (session_high - close) / session_range : na
+            bool retrace_ok_bear = not na(retrace_depth_bear) and retrace_depth_bear >= retrace_min and retrace_depth_bear <= retrace_max
+
+            if bars_ok_bear and lower_high_bear and closes_below_bounce_low_bear and retrace_ok_bear and not bear_vetoed and not s_fired
+                signal_sell := true
+                entry_price_bear := close
+                invalidation_bear := bounce_high_bear
+                s_fired := true
+                b_fired := false
+                break_armed_bear := false
+                break_bar_index_bear := na
+                break_bar_high_bear := na
+                break_extreme_bear := na
+                bounce_high_bear := na
+                bounce_peak_low_bear := na
+                bounce_occurred_bear := false
+
+    if break_armed_bull
+        if bull_break_armed_now
+            bounce_low_bull := na
+            bounce_trough_high_bull := na
+            bounce_occurred_bull := false
+        else if bar_red
+            bounce_occurred_bull := true
+            if na(bounce_low_bull) or low < bounce_low_bull
+                bounce_low_bull := low
+                bounce_trough_high_bull := high
+        else if bar_green and bounce_occurred_bull and not na(bounce_trough_high_bull)
+            bool bars_ok_bull = (bar_index - break_bar_index_bull) <= confirmMaxBars
+            bool higher_low_bull = bounce_low_bull > break_bar_low_bull
+            bool closes_above_bounce_high_bull = close > bounce_trough_high_bull
+            float retrace_depth_bull = session_range > 0 ? (close - session_low) / session_range : na
+            bool retrace_ok_bull = not na(retrace_depth_bull) and retrace_depth_bull >= retrace_min and retrace_depth_bull <= retrace_max
+
+            if bars_ok_bull and higher_low_bull and closes_above_bounce_high_bull and retrace_ok_bull and not bull_vetoed and not b_fired
+                signal_buy := true
+                entry_price_bull := close
+                invalidation_bull := bounce_low_bull
+                b_fired := true
+                s_fired := false
+                break_armed_bull := false
+                break_bar_index_bull := na
+                break_bar_low_bull := na
+                break_extreme_bull := na
+                bounce_low_bull := na
+                bounce_trough_high_bull := na
+                bounce_occurred_bull := false
+
+//======================================================================
 // VISUALS (SCAFFOLD)
 //======================================================================
 plot(anchored_vwap, "Anchored VWAP", color = color.new(color.blue, 40), linewidth = 1)
@@ -525,11 +639,22 @@ plot(showLevels ? last_swing_high : na, "Last Swing High", color = color.new(col
 plot(showLevels ? last_swing_low : na, "Last Swing Low", color = color.new(color.aqua, 0), style = plot.style_stepline, linewidth = 1)
 
 // Break-armed markers — deliberately a small plotshape, distinct from the
-// eventual label.new SELL/BUY signal markers that Phase 4 will add.
+// SELL/SNAPBACK label.new signal markers below.
 plotshape(showState and bear_break_armed_now, title = "Bear Break Armed",
      style = shape.xcross, location = location.abovebar, size = size.tiny, color = color.new(color.orange, 0))
 plotshape(showState and bull_break_armed_now, title = "Bull Break Armed",
      style = shape.xcross, location = location.belowbar, size = size.tiny, color = color.new(color.aqua, 0))
+
+// Confirmation signal labels. Per spec: SELL below the bar, BUY above —
+// note this is the inverse of the usual SELL-above/BUY-below convention;
+// implemented exactly as specified rather than "corrected."
+if signal_sell
+    label.new(bar_index, na, "SELL ⚡ UNWIND", yloc = yloc.belowbar,
+         style = label.style_label_up, color = color.red, textcolor = color.white, size = size.normal)
+
+if signal_buy
+    label.new(bar_index, na, "BUY ⚡ SNAPBACK", yloc = yloc.abovebar,
+         style = label.style_label_down, color = color.green, textcolor = color.white, size = size.normal)
 
 //======================================================================
 // DASHBOARD (SCAFFOLD)
