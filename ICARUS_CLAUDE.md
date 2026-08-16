@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Status: Phase 0 of an 8-phase build. This document will be filled out fully at Phase 8 — it currently
+**Status: Phase 1 of an 8-phase build. This document will be filled out fully at Phase 8 — it currently
 covers only what exists in the code today.**
 
 ## Project Overview
@@ -66,9 +66,15 @@ here it is a prerequisite.
 9. **Scaffold dashboard** — a minimal placeholder table (Profile, RVOL, Session Anchor + timestamp, raw
    Extension) so Phase 0's session-anchoring work is visible on a chart. Replaced by the full
    state-machine dashboard in Phase 7.
+10. **Non-repainting swing structure** — manually-tracked confirmed swing highs/lows (`last_swing_high`,
+    `prev_swing_high`, and the `_low` equivalents, each with a paired `_bar` index), plus
+    `structure_bullish`/`structure_bearish`/`structure_neutral`. See
+    [Swing Confirmation Delay](#swing-confirmation-delay) below. Deliberately does **not** use
+    `ta.pivothigh`/`ta.pivotlow` (banned for signal logic per the phase spec — see
+    [Pine v6 Gotchas](#pine-script-v6-gotchas-encountered-so-far)).
 
-Not yet implemented (later phases): swing structure tracking, trend qualification, break detection,
-confirmation/signal firing, vetoes, ATR bracket exits, R-multiple tracking, full dashboard, alerts.
+Not yet implemented (later phases): trend qualification, break detection, confirmation/signal firing,
+vetoes, ATR bracket exits, R-multiple tracking, full state-machine dashboard, alerts.
 
 ---
 
@@ -117,6 +123,19 @@ session) rather than SuperLazyTrade's calendar-day change, and bar-slot accumula
 overnight bars are simply skipped rather than occupying a bar-slot. Without this, slot indices would drift
 between sessions and the break-bar RVOL test (the core discriminator in Phase 3, per the calibration notes)
 would silently compare against the wrong slot.
+
+**Swing Confirmation Delay:** a swing high at absolute bar `M` requires `swingLookback` bars of hindsight
+on its right side — it can only be confirmed once bar `M + swingLookback` has closed. `is_pivot_high` /
+`is_pivot_low` are evaluated as `high[swingLookback] == ta.highest(high, 2*swingLookback+1)` (the mirror
+for lows), and the resulting state mutation is gated by `barstate.isconfirmed`. Concretely, with the
+default `swingLookback = 5`, a swing printed on bar 100 is not visible to `last_swing_high` /
+`last_swing_low` until bar 105 closes — a fixed 5-bar delay, identical in live trading and historical
+replay (all historical bars are "confirmed" during replay, so the delay there is just the natural bar
+sequence). No signal path in this system can read a swing before that delay elapses, because
+`last_swing_high`/`last_swing_low` (and their `prev_*` predecessors) are the *only* swing references
+anywhere in the script — there is no separate, faster-updating pivot value anything could accidentally
+read instead. `structure_bullish`/`structure_bearish` are pure reads of that already-confirmed state, so
+they add no repaint risk of their own.
 
 **Extension is a prerequisite, not a penalty:** the inverse of SuperLazyTrade's Gate 2 (Stretch). Do not
 port stretch-penalty logic across — a large `ext_min` reading here *qualifies* a setup rather than

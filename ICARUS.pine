@@ -286,9 +286,63 @@ float rel_vol = tod_rvol_active ? rel_vol_tod : rel_vol_rolling
 string rvol_mode_label = tod_rvol_active ? "TOD" : (rvolMode == "Time-of-Day" ? "20-bar*" : "20-bar")
 
 //======================================================================
+// NON-REPAINTING SWING STRUCTURE
+//======================================================================
+// A swing high/low needs `swingLookback` bars of hindsight on its right
+// side before it can be confirmed. ta.pivothigh/ta.pivotlow are banned for
+// signal logic (rule 2) — they carry this exact same lookback but hide it
+// behind the function call, which invites accidentally reading a swing
+// that isn't confirmed yet. Instead the pivot test is done explicitly
+// against high[swingLookback] / low[swingLookback], and state is only
+// latched when barstate.isconfirmed — so the swing at absolute bar
+// (bar_index - swingLookback) becomes visible to any downstream logic
+// only `swingLookback` bars after it printed, never sooner, in both live
+// and historical replay.
+var float last_swing_high = na
+var int   last_swing_high_bar = na
+var float prev_swing_high = na
+var int   prev_swing_high_bar = na
+
+var float last_swing_low = na
+var int   last_swing_low_bar = na
+var float prev_swing_low = na
+var int   prev_swing_low_bar = na
+
+bool swing_window_ready = bar_index >= (2 * swingLookback)
+
+if barstate.isconfirmed and swing_window_ready
+    bool is_pivot_high = high[swingLookback] == ta.highest(high, 2 * swingLookback + 1)
+    bool is_pivot_low  = low[swingLookback]  == ta.lowest(low, 2 * swingLookback + 1)
+
+    if is_pivot_high
+        if not na(last_swing_high)
+            prev_swing_high := last_swing_high
+            prev_swing_high_bar := last_swing_high_bar
+        last_swing_high := high[swingLookback]
+        last_swing_high_bar := bar_index - swingLookback
+
+    if is_pivot_low
+        if not na(last_swing_low)
+            prev_swing_low := last_swing_low
+            prev_swing_low_bar := last_swing_low_bar
+        last_swing_low := low[swingLookback]
+        last_swing_low_bar := bar_index - swingLookback
+
+// Structure classification — a pure read of already-confirmed swing
+// state, so it carries no additional repaint risk beyond the swing
+// confirmation delay documented above.
+bool structure_bullish = not na(prev_swing_high) and not na(prev_swing_low) and
+     last_swing_high > prev_swing_high and last_swing_low > prev_swing_low
+bool structure_bearish = not na(prev_swing_high) and not na(prev_swing_low) and
+     last_swing_high < prev_swing_high and last_swing_low < prev_swing_low
+bool structure_neutral = not structure_bullish and not structure_bearish
+
+//======================================================================
 // VISUALS (SCAFFOLD)
 //======================================================================
 plot(anchored_vwap, "Anchored VWAP", color = color.new(color.blue, 40), linewidth = 1)
+plot(showLevels ? last_swing_high : na, "Last Swing High", color = color.new(color.orange, 0), style = plot.style_stepline, linewidth = 1)
+plot(showLevels ? last_swing_low : na, "Last Swing Low", color = color.new(color.aqua, 0), style = plot.style_stepline, linewidth = 1)
 
 //======================================================================
 // DASHBOARD (SCAFFOLD — Phase 0 only)
