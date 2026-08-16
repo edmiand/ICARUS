@@ -192,9 +192,10 @@ var float session_low = na
 var int session_open_time = na
 
 bool rth_active = not na(time(timeframe.period, "0930-1600:23456"))
-// na(rth_active[1]) covers bar 0 / start-of-history, where there is no
+// barstate.isfirst covers bar 0 / start-of-history, where there is no
 // prior bar to compare against but the session must still initialize.
-bool is_new_range_rth = rth_active and (na(rth_active[1]) or not rth_active[1])
+// (na() on a series bool doesn't resolve cleanly in Pine's overloads.)
+bool is_new_range_rth = rth_active and (barstate.isfirst or not rth_active[1])
 bool is_new_range_full = ta.change(time("D")) != 0 or na(session_high[1])
 bool is_new_range = rangeAnchor == "RTH" ? is_new_range_rth : is_new_range_full
 bool range_active = rangeAnchor == "RTH" ? rth_active : true
