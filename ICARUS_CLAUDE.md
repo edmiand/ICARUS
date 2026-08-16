@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Status: Phase 4 of an 8-phase build. This document will be filled out fully at Phase 8 — it currently
+**Status: Phase 5 of an 8-phase build. This document will be filled out fully at Phase 8 — it currently
 covers only what exists in the code today.**
 
 ## Project Overview
@@ -91,11 +91,23 @@ here it is a prerequisite.
     bounce's low/high, within `confirmMaxBars`, with retracement inside `[retrace_min, retrace_max]` of
     `session_range`. Strict alternation via `b_fired`/`s_fired` (ported from SuperLazyTrade). Records
     `entry_price_*`/`invalidation_*` for Phase 6. Fires `"SELL ⚡ UNWIND"` / `"BUY ⚡ SNAPBACK"` labels.
-    Vetoes are a `false` placeholder pending Phase 5. See
-    [Bounce Tracking](#bounce-tracking-and-the-lower-high-test) below.
+    See [Bounce Tracking](#bounce-tracking-and-the-lower-high-test) below.
+14. **Vetoes** — `bear_vetoed`/`bull_vetoed`, consumed by State 3's confirmation test:
+    - *Trend-Day Lockout* (`useTrendDayLockout`) — a session-level latch (`bear_locked_out`/
+      `bull_locked_out`) that trips when session range exceeds 1.5x daily ATR, close sits in the top/
+      bottom 20% of session range, and ADX is both `> 30` and rising (3-bar). Once tripped it holds for
+      the rest of the session.
+    - *HTF Veto* (`useHtfVeto`) — hard veto (not a penalty) from `request.security` at `htfTimeframe`:
+      blocks SELL when the HTF EMA9/EMA20/close all agree bullish, blocks BUY on the bearish mirror.
+    - *Time-of-Day Gates* (`useTimeGates`) — blocks both directions inside `noEntryOpenMins`/
+      `noEntryCloseMins` of the RTH open/close, computed directly from ET hour/minute rather than the
+      `time()` session-string pattern used elsewhere. See [Pine v6 Gotchas](#pine-script-v6-gotchas-encountered-so-far).
+    - *Consolidation Cancel* (Veto 4) needed no new code — already enforced by Phase 3's `confirmMaxBars`
+      cancellation.
+    Dashboard "Vetoes" row lists any active veto by name, direction-tagged where relevant.
 
-Not yet implemented (later phases): vetoes (wired but inert), ATR bracket exits, R-multiple tracking,
-full state-machine dashboard, alerts.
+Not yet implemented (later phases): ATR bracket exits, R-multiple tracking, full state-machine dashboard,
+alerts.
 
 ---
 
@@ -203,6 +215,21 @@ several green bars before rolling over. This implementation tracks the *running 
 green-closing bars since the break — not just the first one, and not just the most recent one — on the
 reasoning that "the bounce" means the whole rally attempt, and its relevant peak/low pair is whichever bar
 actually set the high. This is a judgment call, not something the spec pins down exactly.
+
+**Time Gates use ET hour/minute directly, not the `time()` session-string pattern:** everywhere else in
+this file, RTH boundaries are tested via `time(timeframe.period, "0930-1600:23456")` (returns non-`na`
+inside the session). The Time Gates veto instead computes `hour(time, "America/New_York") * 60 +
+minute(time, "America/New_York")` and compares directly to 570 (09:30) and 960 (16:00) minutes-since-
+midnight. This is necessary because the veto needs *distance* from the boundary (minutes since open,
+minutes to close), not just an in/out-of-session boolean — the session-string form only answers "is this
+bar inside the window," not "by how much." Like every other RTH reference in this file, it is hardcoded to
+America/New_York and inappropriate for crypto / 24h futures without disabling `useTimeGates`.
+
+**HTF Veto is unconditional `request.security`, gated at the read site:** `request.security` for
+`htf_ema9`/`htf_ema20`/`htf_close` runs every bar regardless of `useHtfVeto`, per the Pine convention of
+not making `request.security` calls conditional. `useHtfVeto` only gates whether `htf_bullish`/
+`htf_bearish` are allowed to contribute to `bear_vetoed`/`bull_vetoed` — this avoids the recalculation
+churn/edge cases that conditional `request.security` calls can trigger.
 
 **Extension is a prerequisite, not a penalty:** the inverse of SuperLazyTrade's Gate 2 (Stretch). Do not
 port stretch-penalty logic across — a large `ext_min` reading here *qualifies* a setup rather than

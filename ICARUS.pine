@@ -518,6 +518,62 @@ if barstate.isconfirmed
             break_extreme_bull := na
 
 //======================================================================
+// VETOES
+//======================================================================
+// On a strong trend day, State 1-4 would otherwise fire repeatedly into
+// a continuing move — these are what make the system survivable.
+// bear_vetoed/bull_vetoed (consumed by the confirmation test below) fold
+// in Vetoes 1-3. Veto 4 (consolidation cancel) needs no code here — it's
+// already enforced by Phase 3's confirmMaxBars cancellation
+// (cancel_bear_time/cancel_bull_time).
+
+// Veto 1: Trend-Day Lockout — a session-level latch. Once tripped for a
+// direction it holds for the rest of the session no matter what price
+// does afterward; it does not un-trip mid-session, only at is_new_range.
+var bool bear_locked_out = false
+var bool bull_locked_out = false
+
+if is_new_range
+    bear_locked_out := false
+    bull_locked_out := false
+
+if useTrendDayLockout and barstate.isconfirmed and session_range > 0 and atr_daily > 0
+    bool trend_day_range = (session_range / atr_daily) > 1.5
+    bool close_top20 = (close - session_low) / session_range >= 0.8
+    bool close_bottom20 = (close - session_low) / session_range <= 0.2
+    bool adx_strong_rising = adx > 30 and adx_rising_3
+
+    if trend_day_range and close_top20 and adx_strong_rising
+        bear_locked_out := true
+    if trend_day_range and close_bottom20 and adx_strong_rising
+        bull_locked_out := true
+
+// Veto 2: HTF Veto — a hard veto, not a score penalty (ICARUS has no
+// scoring system to penalize in the first place). request.security is
+// called unconditionally every bar per Pine convention; useHtfVeto only
+// gates whether the result is allowed to block a signal.
+[htf_ema9, htf_ema20, htf_close] = request.security(syminfo.tickerid, htfTimeframe,
+     [ta.ema(close, 9), ta.ema(close, 20), close], lookahead = barmerge.lookahead_off)
+
+bool htf_bullish = htf_ema9 > htf_ema20 and htf_close > htf_ema20
+bool htf_bearish = htf_ema9 < htf_ema20 and htf_close < htf_ema20
+
+bool htf_veto_sell = useHtfVeto and htf_bullish
+bool htf_veto_buy = useHtfVeto and htf_bearish
+
+// Veto 3: Time-of-Day Gates — hardcoded to ET (0930-1600:23456), the same
+// window used throughout. Inappropriate for crypto / 24h futures without
+// disabling useTimeGates — see ICARUS_CLAUDE.md.
+int et_minutes = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+int minutes_since_open = et_minutes - (9 * 60 + 30)
+int minutes_to_close = (16 * 60) - et_minutes
+bool time_gate_veto = useTimeGates and rth_active and
+     (minutes_since_open < noEntryOpenMins or minutes_to_close < noEntryCloseMins)
+
+bool bear_vetoed = (useTrendDayLockout and bear_locked_out) or htf_veto_sell or time_gate_veto
+bool bull_vetoed = (useTrendDayLockout and bull_locked_out) or htf_veto_buy or time_gate_veto
+
+//======================================================================
 // STATE 3: CONFIRMATION AND SIGNAL
 //======================================================================
 // From an armed break, confirmation requires a failed bounce: at least
@@ -538,9 +594,7 @@ var float bounce_low_bull = na         // trough low of any red-closing bar sinc
 var float bounce_trough_high_bull = na // high of the bar that set that trough
 var bool  bounce_occurred_bull = false
 
-// Phase 5 vetoes wire into these; both stay false (no-op) until then.
-bool bear_vetoed = false
-bool bull_vetoed = false
+// bear_vetoed/bull_vetoed are computed in the VETOES section above.
 
 // Strict alternation, reusing SuperLazyTrade's b_fired/s_fired pattern:
 // a same-direction signal is blocked until the opposite one fires. Phase
@@ -701,6 +755,27 @@ if showDash and barstate.islast
          trend_qualified_bear ? color.red : trend_qualified_bull ? color.lime : color.gray
     table.cell(d, 0, row, "State", text_color = color.white, text_halign = text.align_left, text_size = size.small)
     table.cell(d, 1, row, icarus_state, text_color = state_color, text_size = size.small)
+    row += 1
+
+    // Active vetoes, by name — direction-tagged where a veto only blocks
+    // one side (Trend-Day Lockout, HTF); Time Gate blocks both.
+    string veto_message = ""
+    if useTrendDayLockout and bear_locked_out
+        veto_message += "TREND-DAY LOCK (SELL) "
+    if useTrendDayLockout and bull_locked_out
+        veto_message += "TREND-DAY LOCK (BUY) "
+    if htf_veto_sell
+        veto_message += "HTF VETO (SELL) "
+    if htf_veto_buy
+        veto_message += "HTF VETO (BUY) "
+    if time_gate_veto
+        veto_message += "TIME GATE "
+
+    string veto_display = veto_message == "" ? "NONE" : veto_message
+    color veto_color = veto_message == "" ? color.new(color.gray, 40) : color.orange
+
+    table.cell(d, 0, row, "Vetoes", text_color = veto_color, text_halign = text.align_left, text_size = size.small)
+    table.cell(d, 1, row, veto_display, text_color = veto_color, text_size = size.small)
     row += 1
 
     table.cell(d, 0, row, "RVOL", text_color = color.white, text_halign = text.align_left, text_size = size.small)
