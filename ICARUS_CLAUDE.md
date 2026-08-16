@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Status: Phase 2 of an 8-phase build. This document will be filled out fully at Phase 8 — it currently
+**Status: Phase 3 of an 8-phase build. This document will be filled out fully at Phase 8 — it currently
 covers only what exists in the code today.**
 
 ## Project Overview
@@ -77,9 +77,17 @@ here it is a prerequisite.
     cascade agreement, price on the correct side of `anchored_vwap`, `adx >= adx_trend_min`, and session
     extension `>= ext_min`. Persists through up to 10 consecutive failing bars, then resets; also resets
     on session rollover. See [Trend Qualification Latch](#trend-qualification-latch) below.
+12. **State 2: Break Detection** — `break_armed_bear`/`break_armed_bull` (`var bool` latches), each
+    requiring, from an already-qualified trend: the prior confirmed swing violated, a close beyond both
+    `ema20` and `anchored_vwap`, `rel_vol >= rvol_break`, and bar range `>= atr * atr_break_mult`. Arming
+    stores `break_bar_index_*`, the invalidation reference (`break_bar_high_bear`/`break_bar_low_bull`),
+    and `break_extreme_*` (`session_high`/`session_low` at break time, for Phase 4's retracement math).
+    Cancels on timeout (`confirmMaxBars`), on a reclaim past the invalidation reference, or on session
+    end. Arming one direction immediately cancels the other (rule 8). No signal fires yet — arming only
+    sets up Phase 4's confirmation test.
 
-Not yet implemented (later phases): break detection, confirmation/signal firing, vetoes, ATR bracket
-exits, R-multiple tracking, full state-machine dashboard, alerts.
+Not yet implemented (later phases): confirmation/signal firing, vetoes, ATR bracket exits, R-multiple
+tracking, full state-machine dashboard, alerts.
 
 ---
 
@@ -153,6 +161,23 @@ is still inside its failure window — the dashboard's "State" row breaks that t
 deterministically. Rule 8 ("one direction at a time") is not enforced here because it applies to Phase 3's
 "armed" break state, not to State 1 eligibility — Phase 3 will need to explicitly cancel the opposite
 side's armed state when one arms.
+
+**Break arming is independent of the qualification latch that spawned it:** once `bear_break_trigger` arms
+`break_armed_bear`, the arm's own three cancel conditions (timeout, reclaim, session end) are the only
+things that clear it — `trend_qualified_bear` going false afterward does **not** cancel an active arm. This
+is not an oversight: the moment a break happens, price is by definition below `anchored_vwap`, which
+immediately fails one of `bear_setup_conditions`' five terms, so `trend_qualified_bear`'s fail-streak starts
+counting the instant the break prints. If arming depended on qualification staying true, almost every arm
+would self-cancel within a few bars purely from its own success, which is backwards. The dashboard's
+"State" row reflects this: `⚡ ARMED` takes display priority over `TRENDING`, so a stale/reset qualification
+latch underneath an active arm is invisible by design, not a bug.
+
+**Rule 8 enforcement point:** "one direction at a time" is enforced exactly where arming happens — the
+instant `break_armed_bear` (or `_bull`) latches true, the opposite direction's armed state and all its
+fields are force-reset in the same bar, before that direction's own arm/cancel branch runs later in the
+same `if barstate.isconfirmed` block. It is not enforced at Phase 2's qualification stage (see
+[Trend Qualification Latch](#trend-qualification-latch)) because qualification is eligibility, not
+commitment — only an armed break is a live setup that would conflict with an opposite-direction one.
 
 **Extension is a prerequisite, not a penalty:** the inverse of SuperLazyTrade's Gate 2 (Stretch). Do not
 port stretch-penalty logic across — a large `ext_min` reading here *qualifies* a setup rather than

@@ -423,11 +423,113 @@ else if trend_qualified_bull
             bull_qualify_fail_streak := 0
 
 //======================================================================
+// STATE 2: BREAK DETECTION
+//======================================================================
+// From a qualified trend, a break requires ALL FOUR: the prior confirmed
+// swing is violated (close or wick, per requireCloseBreak), price closes
+// beyond both ema20 and the RTH-anchored VWAP, volume expands past
+// rvol_break, and the bar's range is violent enough (atr_break_mult x
+// ATR). Conditions 1 (structure) and 3 (volume) are the discriminators
+// that separate a real break from an ordinary pullback — per the
+// calibration notes, real breaks take out the prior swing low/high on
+// expanding volume; pullbacks in a healthy trend never do. Arming does
+// NOT fire a signal — that's Phase 4 (CONFIRM). Every arm/cancel
+// decision is gated by barstate.isconfirmed, so nothing here is made on
+// an unconfirmed (still-forming) bar.
+var bool  break_armed_bear = false
+var int   break_bar_index_bear = na
+var float break_bar_high_bear = na   // invalidation reference: a reclaim above this cancels the arm
+var float break_extreme_bear = na    // session_high at break time, for retracement math (Phase 4)
+
+var bool  break_armed_bull = false
+var int   break_bar_index_bull = na
+var float break_bar_low_bull = na    // invalidation reference: a reclaim below this cancels the arm
+var float break_extreme_bull = na    // session_low at break time, for retracement math (Phase 4)
+
+bool bear_break_trigger = trend_qualified_bear and not na(last_swing_low) and
+     (requireCloseBreak ? close < last_swing_low : low < last_swing_low) and
+     close < ema20 and close < anchored_vwap and
+     rel_vol >= rvol_break and
+     (high - low) >= atr * atr_break_mult
+
+bool bull_break_trigger = trend_qualified_bull and not na(last_swing_high) and
+     (requireCloseBreak ? close > last_swing_high : high > last_swing_high) and
+     close > ema20 and close > anchored_vwap and
+     rel_vol >= rvol_break and
+     (high - low) >= atr * atr_break_mult
+
+bool bear_break_armed_now = false
+bool bull_break_armed_now = false
+
+if barstate.isconfirmed
+    // Session ends — cancel any still-armed break from the prior session.
+    if is_new_range
+        break_armed_bear := false
+        break_bar_index_bear := na
+        break_bar_high_bear := na
+        break_extreme_bear := na
+        break_armed_bull := false
+        break_bar_index_bull := na
+        break_bar_low_bull := na
+        break_extreme_bull := na
+
+    // Bearish break (from a qualified uptrend)
+    if not break_armed_bear and bear_break_trigger
+        break_armed_bear := true
+        break_bar_index_bear := bar_index
+        break_bar_high_bear := high
+        break_extreme_bear := session_high
+        bear_break_armed_now := true
+        // Rule 8: arming one direction cancels the other
+        break_armed_bull := false
+        break_bar_index_bull := na
+        break_bar_low_bull := na
+        break_extreme_bull := na
+    else if break_armed_bear
+        bool cancel_bear_time = (bar_index - break_bar_index_bear) > confirmMaxBars
+        bool cancel_bear_reclaim = close > break_bar_high_bear
+        // (b)/(a) Consolidation-timeout or a reclaim back above the break
+        // bar's high both mean the break failed — the trend is resuming,
+        // not reversing.
+        if cancel_bear_time or cancel_bear_reclaim
+            break_armed_bear := false
+            break_bar_index_bear := na
+            break_bar_high_bear := na
+            break_extreme_bear := na
+
+    // Bullish break (from a qualified downtrend) — mirror of the above
+    if not break_armed_bull and bull_break_trigger
+        break_armed_bull := true
+        break_bar_index_bull := bar_index
+        break_bar_low_bull := low
+        break_extreme_bull := session_low
+        bull_break_armed_now := true
+        break_armed_bear := false
+        break_bar_index_bear := na
+        break_bar_high_bear := na
+        break_extreme_bear := na
+    else if break_armed_bull
+        bool cancel_bull_time = (bar_index - break_bar_index_bull) > confirmMaxBars
+        bool cancel_bull_reclaim = close < break_bar_low_bull
+        if cancel_bull_time or cancel_bull_reclaim
+            break_armed_bull := false
+            break_bar_index_bull := na
+            break_bar_low_bull := na
+            break_extreme_bull := na
+
+//======================================================================
 // VISUALS (SCAFFOLD)
 //======================================================================
 plot(anchored_vwap, "Anchored VWAP", color = color.new(color.blue, 40), linewidth = 1)
 plot(showLevels ? last_swing_high : na, "Last Swing High", color = color.new(color.orange, 0), style = plot.style_stepline, linewidth = 1)
 plot(showLevels ? last_swing_low : na, "Last Swing Low", color = color.new(color.aqua, 0), style = plot.style_stepline, linewidth = 1)
+
+// Break-armed markers — deliberately a small plotshape, distinct from the
+// eventual label.new SELL/BUY signal markers that Phase 4 will add.
+plotshape(showState and bear_break_armed_now, title = "Bear Break Armed",
+     style = shape.xcross, location = location.abovebar, size = size.tiny, color = color.new(color.orange, 0))
+plotshape(showState and bull_break_armed_now, title = "Bull Break Armed",
+     style = shape.xcross, location = location.belowbar, size = size.tiny, color = color.new(color.aqua, 0))
 
 //======================================================================
 // DASHBOARD (SCAFFOLD)
@@ -455,17 +557,23 @@ if showDash and barstate.islast
     table.cell(d, 1, row, profile_name, text_color = color.white, text_size = size.small)
     row += 1
 
-    // State 1 qualification — arrow shows the underlying trend direction
-    // being watched for reversal (↑ = uptrend, watching for a bearish
-    // unwind; ↓ = downtrend, watching for a bullish snapback), with the
-    // qualifying direction's extension in daily-ATR units alongside it.
-    // If both latches were somehow true at once (see comment above the
-    // qualification block), bear takes display priority — a deterministic
-    // tie-break, not expected in normal operation.
-    string icarus_state = trend_qualified_bear ? "TRENDING ↑ (" + str.tostring(bear_trend_extension_atr, "#.#") + " ATR)" :
+    // State machine display — ARMED takes priority over TRENDING (an arm
+    // can coexist with a stale or already-reset qualification latch, per
+    // the Phase 3 design note above), which takes priority over
+    // UNQUALIFIED. No arrow on ARMED, matching the eventual Phase 7 format
+    // ("⚡ ARMED (bar 3/8)"); direction is conveyed by color only. The
+    // TRENDING arrow shows the underlying trend direction being watched
+    // (↑ = uptrend, watching for a bearish unwind; ↓ = downtrend, watching
+    // for a bullish snapback). Where both bear/bull latches could
+    // theoretically be true at once, bear takes display priority — a
+    // deterministic tie-break, not expected in normal operation.
+    string icarus_state = break_armed_bear ? "⚡ ARMED (bar " + str.tostring(bar_index - break_bar_index_bear) + "/" + str.tostring(confirmMaxBars) + ")" :
+         break_armed_bull ? "⚡ ARMED (bar " + str.tostring(bar_index - break_bar_index_bull) + "/" + str.tostring(confirmMaxBars) + ")" :
+         trend_qualified_bear ? "TRENDING ↑ (" + str.tostring(bear_trend_extension_atr, "#.#") + " ATR)" :
          trend_qualified_bull ? "TRENDING ↓ (" + str.tostring(bull_trend_extension_atr, "#.#") + " ATR)" :
          "UNQUALIFIED"
-    color state_color = trend_qualified_bear ? color.red : trend_qualified_bull ? color.lime : color.gray
+    color state_color = break_armed_bear or break_armed_bull ? color.orange :
+         trend_qualified_bear ? color.red : trend_qualified_bull ? color.lime : color.gray
     table.cell(d, 0, row, "State", text_color = color.white, text_halign = text.align_left, text_size = size.small)
     table.cell(d, 1, row, icarus_state, text_color = state_color, text_size = size.small)
     row += 1
